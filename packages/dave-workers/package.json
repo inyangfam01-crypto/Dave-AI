@@ -1,0 +1,17 @@
+{
+  "name": "@dave/workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "dependencies": {
+    "@dave/trading": "workspace:*",
+    "@dave/brain": "workspace:*",
+    "@dave/memory": "workspace:*",
+    "@dave/telegram": "workspace:*"
+  },
+  "exports": {
+    ".": "./lib/index.js"
+  }
+}

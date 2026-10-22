@@ -1,0 +1,36 @@
+{
+  "name": "@dave/agent-loop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "dependencies": {
+    "@dave/brain": "workspace:*",
+    "@dave/core": "workspace:*",
+    "@dave/crypto": "workspace:*",
+    "@dave/db": "workspace:*",
+    "@dave/e2b": "workspace:*",
+    "@dave/ea-bridge": "workspace:*",
+    "@dave/feedback": "workspace:*",
+    "@dave/firecrawl": "workspace:*",
+    "@dave/knowledge": "workspace:*",
+    "@dave/lovable-mcp": "workspace:*",
+    "@dave/mcp-manager": "workspace:*",
+    "@dave/memory": "workspace:*",
+    "@dave/notifications": "workspace:*",
+    "@dave/safety": "workspace:*",
+    "@dave/sandbox": "workspace:*",
+    "@dave/self-improve": "workspace:*",
+    "@dave/skills": "workspace:*",
+    "@dave/telegram": "workspace:*",
+    "@dave/trading": "workspace:*",
+    "@dave/vision": "workspace:*",
+    "@dave/workers": "workspace:*",
+    "@resvg/resvg-js": "^2.6.2",
+    "telegram": "^2.26.22"
+  },
+  "exports": {
+    ".": "./lib/index.js"
+  }
+}

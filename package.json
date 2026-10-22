@@ -1,0 +1,25 @@
+{
+  "name": "dave-ai",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "@dave/db": "workspace:*",
+    "@dave/davema": "workspace:*",
+    "@dave/ea-bridge": "workspace:*",
+    "@dave/agent-loop": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json && pnpm --filter @dave/admin run build",
+    "start": "node server.mjs",
+    "test": "for f in packages/*/test/*.test.ts; do echo \"=== $f ===\"; tsx \"$f\" || exit 1; done"
+  }
+}

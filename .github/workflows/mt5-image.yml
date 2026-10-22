@@ -1,0 +1,42 @@
+name: MT5 container image
+
+# Builds mt5/Dockerfile on real Docker and RUNS it: the agent comes up, MetaTrader is installed in
+# the image, and a /configure compiles the EA and starts MT5 with it on a chart. Builds only --
+# nothing is pushed anywhere.
+on:
+  push:
+    paths: ["mt5/**", "ea/DaveEA.mq5", ".github/workflows/mt5-image.yml"]
+  pull_request:
+    paths: ["mt5/**", "ea/DaveEA.mq5"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Agent tests
+        run: python3 mt5/test_agent.py
+      - name: Build image
+        run: docker build -f mt5/Dockerfile -t dave-mt5:ci .
+      - name: Image size
+        run: docker image ls dave-mt5:ci
+      - name: Run it -- EA compiles, MT5 starts with it on a chart
+        run: |
+          docker run -d --name dave-mt5 -m 1g -e MT5_AGENT_SECRET=ci-secret-123 -p 8081:8081 dave-mt5:ci
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8081/health && break; sleep 1; done
+          # Railway's private network can be IPv6-only: where the container has IPv6, the agent must answer on it too.
+          docker exec dave-mt5 python3 -c "import socket,urllib.request as u; socket.has_ipv6 and __import__('os').path.exists('/proc/net/if_inet6') and print('ipv6', u.urlopen('http://[::1]:8081/health', timeout=5).read())"
+          H='x-dave-agent-secret: ci-secret-123'
+          curl -fs -H "$H" http://127.0.0.1:8081/status | tee /tmp/status.json
+          grep -q '"installed": true' /tmp/status.json
+          curl -s -m 400 -X POST -H "$H" -H 'content-type: application/json' http://127.0.0.1:8081/configure \
+            -d '{"login":"12345678","password":"x","server":"MetaQuotes-Demo","webhookUrl":"http://127.0.0.1:9/hooks/ea/t","symbol":"EURUSD","period":"M1"}' | tee /tmp/configure.json
+          grep -q '"ok": true' /tmp/configure.json
+          for i in $(seq 1 60); do curl -fs -H "$H" http://127.0.0.1:8081/logs > /tmp/logs.json; grep -q "loaded successfully" /tmp/logs.json && break; sleep 3; done
+          python3 -c "import json;d=json.load(open('/tmp/logs.json'));print(d['terminal'][-1500:])"
+          grep -q "loaded successfully" /tmp/logs.json
+          docker stats --no-stream dave-mt5
+      - name: Container log
+        if: always()
+        run: docker logs dave-mt5 2>&1 | tail -40 || true

@@ -1,0 +1,15 @@
+{
+  "name": "@dave/e2b",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "dependencies": {
+    "@dave/db": "workspace:*",
+    "e2b": "^2.51.0"
+  },
+  "exports": {
+    ".": "./lib/index.js"
+  }
+}

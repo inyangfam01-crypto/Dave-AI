@@ -1,0 +1,333 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { appendSettingsLogEntry } from "./settings-log.js";
+
+/**
+ * Step 10.1: SL, TP, and lot size each have an Off/On/Auto mode. "On"
+ * always means the user's own exact value -- never a hardcoded default.
+ * Max open trades and max daily loss are optional, off by default, and
+ * PROTECTED per SECURITY.md: changing them always requires fresh
+ * explicit approval, never bundled into a general settings change.
+ */
+
+export type RiskMode = "off" | "on" | "auto";
+
+export interface RiskSettings {
+  slMode: RiskMode;
+  slValue?: number; // only meaningful when slMode === "on"
+  tpMode: RiskMode;
+  tpValue?: number;
+  lotMode: RiskMode;
+  lotValue?: number;
+  maxOpenTrades?: number; // protected -- see requestProtectedLimitChange
+  maxDailyLossPct?: number; // protected
+  /** The trader chose SL "off" in their saved settings -- then no stop goes to the broker. An
+   *  account that never saved risk settings keeps Dave's stop (computed, not stored). */
+  slOffChosen?: boolean;
+}
+
+// Note: SL "off" means NO stop at the broker (the trader, 3 Oct) -- choose "auto" for Dave's stop.
+const DEFAULT_SETTINGS: RiskSettings = { slMode: "off", tpMode: "off", lotMode: "off" };
+
+function settingsPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "risk-settings.json");
+}
+
+export function getRiskSettings(userId: string): RiskSettings {
+  const path = settingsPath(userId);
+  // SL off means off -- the default included (the trader saw "SL off" in the app and the bot
+  // still placed stops because no settings file had been saved yet).
+  if (!existsSync(path)) return { ...DEFAULT_SETTINGS, slOffChosen: DEFAULT_SETTINGS.slMode === "off" };
+  const saved = JSON.parse(readFileSync(path, "utf8")) as RiskSettings;
+  return { ...saved, slOffChosen: saved.slMode === "off" };
+}
+
+function saveRiskSettings(userId: string, settings: RiskSettings): void {
+  const path = settingsPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(settings, null, 2), "utf8");
+}
+
+export class OnModeRequiresValueError extends Error {
+  constructor(field: "sl" | "tp" | "lot") {
+    super(`Setting ${field} to "on" requires the user's own exact value -- prompt for it, never assume a default.`);
+    this.name = "OnModeRequiresValueError";
+  }
+}
+
+/**
+ * Sets SL/TP/lot mode. Enforced here, not just documented: passing
+ * mode="on" without a real value throws -- this is what makes "On always
+ * prompts for the user's own exact value" a real constraint instead of a
+ * convention callers could forget.
+ */
+export function setRiskMode(userId: string, field: "sl" | "tp" | "lot", mode: RiskMode, value?: number): void {
+  if (mode === "on" && (value === undefined || value === null)) {
+    throw new OnModeRequiresValueError(field);
+  }
+  const settings = getRiskSettings(userId);
+  const oldMode = field === "sl" ? settings.slMode : field === "tp" ? settings.tpMode : settings.lotMode;
+  const oldValue = field === "sl" ? settings.slValue : field === "tp" ? settings.tpValue : settings.lotValue;
+  if (field === "sl") {
+    settings.slMode = mode;
+    settings.slValue = mode === "on" ? value : undefined;
+  } else if (field === "tp") {
+    settings.tpMode = mode;
+    settings.tpValue = mode === "on" ? value : undefined;
+  } else {
+    settings.lotMode = mode;
+    settings.lotValue = mode === "on" ? value : undefined;
+  }
+  saveRiskSettings(userId, settings);
+  appendSettingsLogEntry(userId, field, { mode: oldMode, value: oldValue }, { mode, value: mode === "on" ? value : undefined });
+}
+
+// --- Protected limits: max open trades, max daily loss ---
+// --- Update 8: generalized to any Dave-INITIATED settings change (SL/
+//     TP/lot mode included), gated by approve/decline by default, with
+//     an opt-in auto-approval switch. Protected limits stay extra-
+//     protected: they ALWAYS require explicit approval regardless of
+//     the auto-approval switch, per the existing SECURITY.md posture.
+
+export type PendingSettingsChange =
+  | { id: string; field: "sl" | "tp" | "lot"; mode: RiskMode; value?: number; reason: string; createdAt: number }
+  | { id: string; field: "maxOpenTrades" | "maxDailyLossPct"; newValue: number; reason: string; createdAt: number };
+
+const PROTECTED_FIELDS = new Set<PendingSettingsChange["field"]>(["maxOpenTrades", "maxDailyLossPct"]);
+
+function pendingLimitPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "pending-settings-changes.json");
+}
+
+function readPendingLimits(userId: string): PendingSettingsChange[] {
+  const path = pendingLimitPath(userId);
+  if (!existsSync(path)) return [];
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function savePendingLimits(userId: string, changes: PendingSettingsChange[]): void {
+  const path = pendingLimitPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(changes, null, 2), "utf8");
+}
+
+function isModeField(change: PendingSettingsChange): change is Extract<PendingSettingsChange, { mode: RiskMode }> {
+  return change.field === "sl" || change.field === "tp" || change.field === "lot";
+}
+
+function applyPendingChange(userId: string, change: PendingSettingsChange): RiskSettings {
+  const settings = getRiskSettings(userId);
+  if (isModeField(change)) {
+    if (change.field === "sl") {
+      settings.slMode = change.mode;
+      settings.slValue = change.mode === "on" ? change.value : undefined;
+    } else if (change.field === "tp") {
+      settings.tpMode = change.mode;
+      settings.tpValue = change.mode === "on" ? change.value : undefined;
+    } else {
+      settings.lotMode = change.mode;
+      settings.lotValue = change.mode === "on" ? change.value : undefined;
+    }
+  } else {
+    settings[change.field] = change.newValue;
+  }
+  saveRiskSettings(userId, settings);
+  return settings;
+}
+
+/**
+ * Step 10.1/SECURITY.md: proposing a change to a protected limit never
+ * applies it directly -- it's queued, requiring a SEPARATE, fresh
+ * approveProtectedLimitChange() call. Never bundled into
+ * setRiskMode()/general settings, and a prior approval never carries
+ * over to a new proposed value.
+ */
+export function proposeProtectedLimitChange(userId: string, field: "maxOpenTrades" | "maxDailyLossPct", newValue: number, reason: string): PendingSettingsChange {
+  const changes = readPendingLimits(userId);
+  const change: PendingSettingsChange = { id: `${Date.now()}-${changes.length}`, field, newValue, reason, createdAt: Date.now() };
+  changes.push(change);
+  savePendingLimits(userId, changes);
+  return change;
+}
+
+export function listPendingLimitChanges(userId: string): PendingSettingsChange[] {
+  return readPendingLimits(userId);
+}
+
+/** Explicit, separate approval -- this is the only way a protected limit ever actually changes. */
+export function approveProtectedLimitChange(userId: string, changeId: string): RiskSettings {
+  const changes = readPendingLimits(userId);
+  const change = changes.find((c) => c.id === changeId);
+  if (!change) throw new Error(`No pending limit change ${changeId} for ${userId}`);
+  const settings = applyPendingChange(userId, change);
+  savePendingLimits(userId, changes.filter((c) => c.id !== changeId));
+  return settings;
+}
+
+export function rejectProtectedLimitChange(userId: string, changeId: string): void {
+  const changes = readPendingLimits(userId);
+  savePendingLimits(userId, changes.filter((c) => c.id !== changeId));
+}
+
+// --- Auto-approval switch: OFF by default -- Dave must ask before it acts on its own initiative ---
+
+function autoApprovalPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "auto-approval.json");
+}
+
+export function getAutoApprovalEnabled(userId: string): boolean {
+  const path = autoApprovalPath(userId);
+  if (!existsSync(path)) return false;
+  return (JSON.parse(readFileSync(path, "utf8")) as { enabled: boolean }).enabled;
+}
+
+export function setAutoApprovalEnabled(userId: string, enabled: boolean): void {
+  const path = autoApprovalPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled }, null, 2), "utf8");
+}
+
+// --- Self-pause switch: ON by default -- the bot may pause itself (up to 5 min) when it judges
+// exposure is already high; the user can turn this off entirely so it never self-pauses. ---
+
+function selfPauseEnabledPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "self-pause-enabled.json");
+}
+
+export function getSelfPauseEnabled(userId: string): boolean {
+  const path = selfPauseEnabledPath(userId);
+  if (!existsSync(path)) return true;
+  return (JSON.parse(readFileSync(path, "utf8")) as { enabled: boolean }).enabled;
+}
+
+export function setSelfPauseEnabled(userId: string, enabled: boolean): void {
+  const path = selfPauseEnabledPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled }, null, 2), "utf8");
+}
+
+// --- Two-step trading: a second, independent AI ("Flo") approves or declines every trade before
+// it fires. OFF by default -- an explicit opt-in, same file-backed boolean pattern as self-pause
+// above (default value baked into the getter, not duplicated elsewhere). ---
+
+function twoStepTradingEnabledPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "two-step-trading-enabled.json");
+}
+
+export function getTwoStepTradingEnabled(userId: string): boolean {
+  const path = twoStepTradingEnabledPath(userId);
+  if (!existsSync(path)) return false;
+  return (JSON.parse(readFileSync(path, "utf8")) as { enabled: boolean }).enabled;
+}
+
+export function setTwoStepTradingEnabled(userId: string, enabled: boolean): void {
+  const path = twoStepTradingEnabledPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled }, null, 2), "utf8");
+}
+
+// --- Sequential thinking (trade decisions only): an adapted version of the MCP
+// "sequential-thinking" reference server's technique (numbered, revisable reasoning steps) run
+// as a bounded extra pass before the autonomous tick's final trade decision -- see
+// dave-agent-loop's sequential-thinking.ts. OFF by default -- an explicit opt-in, same
+// file-backed boolean pattern as two-step trading above, because it genuinely costs extra real
+// tokens/latency per decision (several extra model round trips) for a trade quality improvement
+// that not every user wants to pay for. ---
+
+function sequentialThinkingEnabledPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "trading", userId, "sequential-thinking-enabled.json");
+}
+
+export function getSequentialThinkingEnabled(userId: string): boolean {
+  const path = sequentialThinkingEnabledPath(userId);
+  if (!existsSync(path)) return false;
+  return (JSON.parse(readFileSync(path, "utf8")) as { enabled: boolean }).enabled;
+}
+
+export function setSequentialThinkingEnabled(userId: string, enabled: boolean): void {
+  const path = sequentialThinkingEnabledPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled, effort: getSequentialThinkingEffort(userId) }, null, 2), "utf8");
+}
+
+/** How hard the sequential-thinking pass works (the trader: "so it can think like high"). Stored
+ *  next to the on/off switch; "medium" is the original 5-step pass. */
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+export function getSequentialThinkingEffort(userId: string): ThinkingEffort {
+  const path = sequentialThinkingEnabledPath(userId);
+  if (!existsSync(path)) return "medium";
+  try {
+    const e = (JSON.parse(readFileSync(path, "utf8")) as { effort?: string }).effort;
+    return THINKING_EFFORTS.includes(e as ThinkingEffort) ? (e as ThinkingEffort) : "medium";
+  } catch {
+    return "medium";
+  }
+}
+
+export function setSequentialThinkingEffort(userId: string, effort: ThinkingEffort): void {
+  if (!THINKING_EFFORTS.includes(effort)) throw new Error(`effort must be one of ${THINKING_EFFORTS.join(", ")}`);
+  const path = sequentialThinkingEnabledPath(userId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled: getSequentialThinkingEnabled(userId), effort }, null, 2), "utf8");
+}
+
+/** Item 8 (/reset "config/settings back to defaults"): deletes the underlying files so
+ * getRiskSettings/getAutoApprovalEnabled's own real fallback defaults take over -- no hardcoded
+ * default duplicated here that could drift from those functions' own definition of "default". */
+export function resetRiskSettingsForUser(userId: string): void {
+  rmSync(settingsPath(userId), { force: true });
+  rmSync(autoApprovalPath(userId), { force: true });
+  rmSync(pendingLimitPath(userId), { force: true });
+  rmSync(twoStepTradingEnabledPath(userId), { force: true });
+  rmSync(sequentialThinkingEnabledPath(userId), { force: true });
+}
+
+export interface SettingsChangeDecision {
+  applied: boolean;
+  pendingId?: string;
+  settings?: RiskSettings;
+}
+
+/**
+ * Update 8: the entry point for a Dave-INITIATED settings change --
+ * "whenever it wants to do it, it should ask the user approve or
+ * decline ... unless auto-approval is on." SL/TP/lot respect the
+ * auto-approval switch; maxOpenTrades/maxDailyLossPct never do
+ * (PROTECTED_FIELDS), matching the existing extra-protection posture.
+ * A user calling setRiskMode()/proposeProtectedLimitChange() directly
+ * (their OWN action via a settings command) is unaffected -- this
+ * function is specifically for Dave proposing a change on its own.
+ */
+export function proposeSettingsChange(userId: string, field: "sl" | "tp" | "lot", mode: RiskMode, value: number | undefined, reason: string): SettingsChangeDecision {
+  if (mode === "on" && (value === undefined || value === null)) {
+    throw new OnModeRequiresValueError(field);
+  }
+  const change: PendingSettingsChange = { id: `${Date.now()}-${readPendingLimits(userId).length}`, field, mode, value, reason, createdAt: Date.now() };
+
+  if (!PROTECTED_FIELDS.has(field) && getAutoApprovalEnabled(userId)) {
+    const settings = applyPendingChange(userId, change);
+    return { applied: true, settings };
+  }
+
+  const changes = readPendingLimits(userId);
+  changes.push(change);
+  savePendingLimits(userId, changes);
+  return { applied: false, pendingId: change.id };
+}
+
+/** Generalized approve, covering SL/TP/lot as well as protected limits. */
+export function approveSettingsChange(userId: string, changeId: string): RiskSettings {
+  return approveProtectedLimitChange(userId, changeId);
+}
+
+export function declineSettingsChange(userId: string, changeId: string): void {
+  rejectProtectedLimitChange(userId, changeId);
+}

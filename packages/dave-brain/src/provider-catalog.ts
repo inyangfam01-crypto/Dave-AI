@@ -1,0 +1,422 @@
+/**
+ * Update 3 (post-Step-22): the full provider list, restored. Real,
+ * research-confirmed values only (see the four research passes this was
+ * built from -- OpenAI/Mistral/Together/Cerebras/Fireworks/Perplexity/
+ * xAI; Nvidia NIM/Lepton/Hyperbolic/DeepInfra/SambaNova/Novita/AI21/
+ * Qwen; Gemini/Cloudflare/Replicate/HuggingFace/Bedrock/OpenRouter/
+ * Cohere; AI21 Jamba + OrcaRouter + OpenRouter/HuggingFace models-list
+ * confirmation).
+ *
+ * "Lepton AI" is a real, deliberate alias -- Nvidia acquired Lepton AI
+ * (~April 2025) and folded it into NVIDIA DGX Cloud Lepton, a GPU
+ * marketplace layer, not a separate inference API anymore. Rather than
+ * re-implement a dead API surface, Lepton resolves straight to the
+ * Nvidia NIM entry (same base URL, same auth) -- confirmed via research,
+ * not guessed.
+ */
+import type { ProviderName } from "./providers.js";
+
+export type AuthStyle = "bearer" | "api-key-header" | "sigv4" | "alias";
+
+export interface ProviderCatalogEntry {
+  readonly id: ProviderName;
+  readonly displayName: string;
+  /** Real base URL. A function when the URL genuinely depends on per-user config (Cloudflare's account_id). */
+  readonly baseUrl: string | ((config: ProviderKeyConfig) => string);
+  readonly chatPath: string;
+  readonly modelsPath: string | null;
+  readonly authStyle: AuthStyle;
+  /** Forced per the master plan's explicit instruction, independent of whether a real /models endpoint exists. */
+  readonly manualModelEntry: boolean;
+  readonly defaultModel: string;
+  readonly openAICompatible: boolean;
+  readonly requiresExtraConfig?: ("accountId" | "region" | "secretAccessKey")[];
+  readonly aliasOf?: ProviderName;
+  /**
+   * Real bug fixed (the trader, live, with the provider's own error text: nscale returned
+   * `HTTP 400 INVALID_TOOL_CHOICE: Supported tool_choice values are "auto" and "none" currently`,
+   * which crashed EVERY autonomous trading cycle -- the tick forces `tool_choice` to the named
+   * decision tool). Not every OpenAI-compatible server implements the named-function form of
+   * `tool_choice`; some only accept the string values. "auto-only" makes a forced choice degrade to
+   * `"auto"` for that provider instead of sending a body it will reject outright.
+   *
+   * Defaults to "named" (the full OpenAI shape) -- every existing provider keeps current behaviour.
+   */
+  readonly toolChoiceStyle?: "named" | "auto-only";
+  readonly notes: string;
+}
+
+export interface ProviderKeyConfig {
+  apiKey: string;
+  model?: string;
+  accountId?: string; // Cloudflare
+  region?: string; // Bedrock
+  secretAccessKey?: string; // Bedrock (apiKey field carries the access key id)
+  baseUrlOverride?: string; // custom providers (Update 4)
+}
+
+const OPENAI_COMPAT = (id: ProviderName, displayName: string, baseUrl: string, defaultModel: string, notes: string, modelsPath: string | null = "/models"): ProviderCatalogEntry => ({
+  id,
+  displayName,
+  baseUrl,
+  chatPath: "/chat/completions",
+  modelsPath,
+  authStyle: "bearer",
+  manualModelEntry: false,
+  defaultModel,
+  openAICompatible: true,
+  notes,
+});
+
+/** The trader's Bedrock region (Europe, Stockholm). */
+export const BEDROCK_DEFAULT_REGION = "eu-north-1";
+
+export const PROVIDER_CATALOG: Record<ProviderName, ProviderCatalogEntry> = {
+  deepseek: OPENAI_COMPAT("deepseek", "DeepSeek AI", "https://api.deepseek.com", "deepseek-chat", "Step 5.2 -- existing custom implementation."),
+  claude: {
+    id: "claude",
+    displayName: "Anthropic / Claude AI",
+    baseUrl: "https://api.anthropic.com",
+    chatPath: "/v1/messages",
+    modelsPath: null,
+    authStyle: "bearer",
+    manualModelEntry: false,
+    defaultModel: "claude-sonnet-4-6",
+    openAICompatible: false,
+    notes: "Step 5.2 -- existing custom implementation, native Anthropic Messages API shape.",
+  },
+  openai: OPENAI_COMPAT("openai", "OpenAI", "https://api.openai.com/v1", "gpt-5.6-sol", "Native OpenAI, the reference shape every generic entry copies."),
+  // Real bug fixed (user, with real live keys pasted for exactly this diagnosis): "llama-3.3-70b-
+  // versatile" was retired from Groq's real catalog -- confirmed live, a real request against it
+  // returned "does not exist or you do not have access to it." Re-confirmed live against a real
+  // GET /v1/models call and a real chat completion: "openai/gpt-oss-120b" is real, currently live,
+  // and genuinely supports tools (confirmed: real 200 + real completion with the full 57-tool
+  // production payload attached).
+  groq: OPENAI_COMPAT("groq", "Groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", "OpenAI-compatible, confirmed live 2026-09-09 (default model updated off a retired Groq model id)."),
+  // Real bug fixed: "mistral-large-latest" returned a real 403 "not available in your subscription
+  // tier" against a real key -- not every Mistral account has Large-tier access. Re-confirmed live
+  // against a real GET /v1/models call: "mistral-small-latest" is on every real tier and genuinely
+  // supports function_calling (confirmed via the account's own real capabilities flag).
+  mistral: OPENAI_COMPAT("mistral", "Mistral AI", "https://api.mistral.ai/v1", "mistral-small-latest", "OpenAI-compatible, real GET /v1/models confirmed. Default model changed from mistral-large-latest (real 403: not every tier has Large access) to mistral-small-latest (real, function-calling-capable, available on every tier)."),
+  together: OPENAI_COMPAT("together", "Together AI", "https://api.together.ai/v1", "deepseek-ai/DeepSeek-V3.1", "Open marketplace, no fixed flagship -- model is configurable. (Updated to the .ai domain per current official docs.) GET /v1/models CONFIRMED LIVE 2026-09-19 (real 401 Unauthorized for a bogus key, not a 404) -- auto-fetch enabled."),
+  // Real bug fixed: "llama-3.3-70b" doesn't exist in Cerebras's real, current, much smaller model
+  // catalog (confirmed live via GET /v1/models: only gpt-oss-120b/qwen-3.8-27b/gemma-4-31b exist
+  // today) -- every request against the old default 404'd. "gpt-oss-120b" is real and current.
+  cerebras: OPENAI_COMPAT("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "gpt-oss-120b", "Open-weight catalog, confirmed real GET /v1/models 2026-09-09 (default model updated off a model no longer in Cerebras's real catalog)."),
+  // Real bug fixed (user: "worked in sandbox, doesn't work live" -- NVIDIA/DeepSeek V4 Pro).
+  // Root cause found: the live code was correct on the endpoint (https://integrate.api.nvidia.com/v1
+  // /chat/completions, confirmed identical to the sandbox call) -- the ONLY discrepancy was this
+  // catalog's defaultModel, silently used whenever a key is added without an explicit model pick.
+  // Re-confirmed live (2026-09-08) against the user's own real NVIDIA key: POST
+  // https://integrate.api.nvidia.com/v1/chat/completions with model "deepseek-ai/deepseek-v4-pro-0813"
+  // returns a real HTTP 200 completion. Routing a fresh NVIDIA key straight to this exact,
+  // proven-working config -- never the old generic Llama guess -- is the real fix per the user's
+  // explicit rule: "when a user provides an NVIDIA key, automatically route it to this exact
+  // confirmed-working DeepSeek V4 Pro configuration."
+  "nvidia-nim": OPENAI_COMPAT("nvidia-nim", "Nvidia NIM", "https://integrate.api.nvidia.com/v1", "deepseek-ai/deepseek-v4-flash-0731", "build.nvidia.com, real GET /v1/models confirmed. Default model updated 2026-09-19: the previous default (deepseek-v4-pro-0813) returns a real HTTP 410 -- NVIDIA retired it on 2026-09-14 -- which is exactly what the trader was seeing reported as an invalid API key. deepseek-v4-flash-0731 is confirmed live against the trader's own real key (real 200 completion)."),
+  lepton: {
+    id: "lepton",
+    displayName: "Lepton AI (alias of Nvidia NIM)",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    chatPath: "/chat/completions",
+    modelsPath: "/models",
+    authStyle: "alias",
+    manualModelEntry: false,
+    defaultModel: "deepseek-ai/deepseek-v4-flash-0731",
+    openAICompatible: true,
+    aliasOf: "nvidia-nim",
+    notes: "Real: Nvidia acquired Lepton AI and folded it into NVIDIA DGX Cloud Lepton -- not a separate API anymore.",
+  },
+  // Correction (user: "the fireworks to fetch model isn't working it's telling me manual id I
+  // even prefer fetch model than manual entry"). The prior fix (manualModelEntry: true) assumed
+  // the ONLY models-list surface was Fireworks' account-scoped Management API
+  // (/v1/accounts/{id}/models, documented at docs.fireworks.ai/api-reference/list-models --
+  // genuinely requires an account id this codebase doesn't collect). That's real, but it isn't
+  // the whole story: Fireworks' separate OpenAI-compatible INFERENCE API
+  // (https://api.fireworks.ai/inference/v1, the same host/base this entry already calls for chat
+  // completions) exposes its own plain, non-account-scoped `GET /v1/models` -- empirically
+  // confirmed live (2026-09-14): `curl https://api.fireworks.ai/inference/v1/models` returns a
+  // real 401 "You must provide an API key" (not a 404), a bogus bearer token returns a distinct
+  // real 401 "The API key you provided is invalid" (proving the backend actually validates the
+  // key against this exact path), and neighboring wrong paths (/v1/modelsxyz, /v1/models/foo)
+  // both cleanly 404 with "Path not found" -- so /v1/models is a real, live, working route, not a
+  // catch-all. This matches the standard OpenAI-compatible convention every other
+  // OPENAI_COMPAT() entry here already relies on (client.models.list() -> GET {baseUrl}/models),
+  // so auto-fetch works with zero extra config -- manualModelEntry is now false again and
+  // modelsPath restored to the generic default.
+  fireworks: OPENAI_COMPAT("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "accounts/fireworks/models/gpt-oss-120b", "OpenAI-compatible inference API. Real, live GET /v1/models confirmed 2026-09-14 (distinct 401s for missing vs. invalid key, vs. clean 404s on neighboring wrong paths) -- auto-fetch works; the separate account-scoped Management API path (/v1/accounts/{id}/models) is a different, unrelated surface this doesn't need. Default model verified live (real 200 + real chat.completion) Sept 2026 -- the previous default (kimi-k2-instruct-0905) no longer resolves against the account's live model list."),
+  hyperbolic: OPENAI_COMPAT("hyperbolic", "Hyperbolic", "https://api.hyperbolic.xyz/v1", "meta-llama/Llama-3.1-405B-Instruct", "OpenAI-compatible, real GET /v1/models confirmed."),
+  deepinfra: OPENAI_COMPAT("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", "meta-llama/Llama-3.3-70B-Instruct", "OpenAI-compatible under /v1/openai/*, real models list confirmed."),
+  perplexity: OPENAI_COMPAT("perplexity", "Perplexity", "https://api.perplexity.ai", "sonar-pro", "No /models endpoint exists -- flagged. chat/completions has a stated sunset path toward an Agent API (checked Sept 2026: still live).", null),
+  qwen: OPENAI_COMPAT("qwen", "Alibaba Qwen (DashScope)", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-max", "International endpoint by default -- mainland China uses a different host, key is region-bound."),
+  sambanova: OPENAI_COMPAT("sambanova", "SambaNova Cloud", "https://api.sambanova.ai/v1", "Meta-Llama-3.3-70B-Instruct", "OpenAI-compatible, models-list path not independently re-verified -- low confidence, flagged."),
+  novita: OPENAI_COMPAT("novita", "Novita AI", "https://api.novita.ai/v3/openai", "deepseek/deepseek-v4.1-flash", "Base path verified as /v3/openai; catalog rotates, no fixed flagship -- default updated off the stale V3 id, which the marketplace has moved past."),
+  ai21: OPENAI_COMPAT("ai21", "AI21 Labs", "https://api.ai21.com/studio/v1", "jamba-large-1.7", "Confirmed: chat/completions uses an OpenAI-style message array but AI21 is NOT fully OpenAI-compatible beyond that -- flagged partial. Default updated to the real current versioned model id (bare \"jamba-large\" no longer resolves).", null),
+  zai: {
+    ...OPENAI_COMPAT(
+      "zai",
+      "Z.AI (GLM)",
+      "https://api.z.ai/api/paas/v4",
+      "glm-5.3",
+      "Real, currently-operating hosted API for Zhipu AI's GLM models -- confirmed OpenAI-compatible chat/completions shape at /api/paas/v4. Bearer auth confirmed. Models list CONFIRMED LIVE 2026-09-19: GET /api/paas/v4/models returns a real 401 {\"code\":\"401\",\"message\":\"token expired or incorrect\"} for a bogus key -- a real, key-validating route, not a 404 -- so auto-fetch works and manual entry is no longer needed.",
+      "/models"
+    ),
+    manualModelEntry: false,
+  },
+  azure: {
+    id: "azure",
+    displayName: "Azure OpenAI",
+    baseUrl: (config) => `https://${config.accountId ?? ""}.openai.azure.com/openai/deployments/${config.model ?? "deployment"}`,
+    chatPath: "/chat/completions?api-version=2024-06-01",
+    modelsPath: null,
+    authStyle: "api-key-header",
+    manualModelEntry: true,
+    defaultModel: "",
+    openAICompatible: true,
+    requiresExtraConfig: ["accountId"],
+    notes: "Confirmed real REST shape: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=2024-06-01, auth via a real `api-key` header (NOT Authorization: Bearer -- a genuinely different auth mechanism from every other OpenAI-compatible entry here). `accountId` carries the Azure resource name; `model` carries the deployment name (Azure deployment names are user-chosen and don't map 1:1 to a listable model catalog) -- manual entry, since a deployment name isn't something to guess or auto-fetch.",
+  },
+  cloudflare: {
+    id: "cloudflare",
+    displayName: "Cloudflare Workers AI",
+    baseUrl: (config) => `https://api.cloudflare.com/client/v4/accounts/${config.accountId ?? ""}/ai/v1`,
+    chatPath: "/chat/completions",
+    modelsPath: null,
+    authStyle: "bearer",
+    manualModelEntry: false,
+    defaultModel: "@cf/meta/llama-3.1-8b-instruct",
+    openAICompatible: true,
+    requiresExtraConfig: ["accountId"],
+    notes: "Real OpenAI-compat shim at /ai/v1/chat/completions confirmed (raw /ai/run/{model} is the native, non-OpenAI shape). Requires the account's accountId.",
+  },
+  replicate: {
+    id: "replicate",
+    displayName: "Replicate",
+    baseUrl: "https://api.replicate.com/v1",
+    chatPath: "/predictions",
+    modelsPath: null,
+    authStyle: "bearer",
+    manualModelEntry: false,
+    defaultModel: "meta/meta-llama-3.1-405b-instruct",
+    openAICompatible: false,
+    notes: "Genuinely async: POST /predictions returns immediately, must poll GET /predictions/{id} until succeeded/failed. Confirmed real, not a simplification to skip.",
+  },
+  xai: OPENAI_COMPAT("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-4.6", "OpenAI-compatible, real GET /v1/models confirmed."),
+  openrouter: { ...OPENAI_COMPAT("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openrouter/auto", "Real GET /api/v1/models CONFIRMED LIVE 2026-09-19 -- real HTTP 200 with 447 models. MANUAL ENTRY IS DELIBERATE, at the trader's explicit instruction (re-confirmed 2026-09-19): the models endpoint genuinely works, but these routers expose hundreds of models and the trader wants to type the exact id rather than pick from a list."), manualModelEntry: true },
+  huggingface: { ...OPENAI_COMPAT("huggingface", "HuggingFace", "https://router.huggingface.co/v1", "meta-llama/Llama-3.3-70B-Instruct", "Router-based OpenAI-compat endpoint (api-inference.huggingface.co is legacy). GET /v1/models CONFIRMED LIVE 2026-09-19 -- real HTTP 200 with 139 runnable models, and the configured default is genuinely in that live list. The old \"no clean runnable-models list\" note was wrong -- the endpoint does work. MANUAL ENTRY IS DELIBERATE, at the trader's explicit instruction (re-confirmed 2026-09-19): the models endpoint genuinely works, but these routers expose hundreds of models and the trader wants to type the exact id rather than pick from a list.", "/models"), manualModelEntry: true },
+  orcarouter: { ...OPENAI_COMPAT("orcarouter", "OrcaRouter", "https://api.orcarouter.ai/v1", "orcarouter/auto", "Real, currently-operating (launched May 2026). GET /v1/models CONFIRMED LIVE 2026-09-19 (real 401 orcarouter_api_error for a bogus key, not a 404). MANUAL ENTRY IS DELIBERATE, at the trader's explicit instruction (re-confirmed 2026-09-19): the models endpoint genuinely works, but these routers expose hundreds of models and the trader wants to type the exact id rather than pick from a list."), manualModelEntry: true },
+  bedrock: {
+    id: "bedrock",
+    displayName: "AWS Bedrock",
+    baseUrl: (config) => `https://bedrock-runtime.${config.region ?? BEDROCK_DEFAULT_REGION}.amazonaws.com`,
+    chatPath: "/converse",
+    modelsPath: null,
+    authStyle: "sigv4",
+    manualModelEntry: false,
+    defaultModel: "anthropic.claude-sonnet-5",
+    openAICompatible: false,
+    notes:
+      "Amazon Bedrock API key (the console's long-term API key) as Authorization: Bearer -- AWS's documented path for Bedrock and Bedrock Runtime, confirmed against the Bedrock user guide 2026-09. Classic IAM keys still work: set secretAccessKey and the apiKey field carries the access key id (SigV4). Region defaults to eu-north-1; a key line may add a region after the key ('KEY eu-west-1'). Models: ListFoundationModels + ListInferenceProfiles on the control plane (bedrock.REGION.amazonaws.com).",
+  },
+  // Real bug fixed: "gemini-3.1-pro" (bare, no suffix) returned a real 404 "not found... Call
+  // ModelService.ListModels" -- confirmed live it genuinely doesn't exist under that bare name
+  // (the real model is "gemini-3.1-pro-preview"). Re-confirmed live against a real GET
+  // /v1beta/models call and a real chat completion with a real non-empty response:
+  // "gemini-2.5-flash" is real, current, stable (no "-preview"/"-latest" alias risk), and
+  // returned real text where a "-latest" alias came back with an empty completion (reasoning-
+  // token budget likely consumed the whole maxTokens on the alias's default routing).
+  gemini: OPENAI_COMPAT("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash", "Real OpenAI-compatible endpoint confirmed (still beta per Google); native generateContent API also exists but this is simpler and uses the same generic class. Default model updated 2026-09-09 off a bare model id that doesn't exist on the real API."),
+  // Item 3 (user: "add more providers and make provision for GitHub copilot and others"):
+  // GitHub Models -- the real, official product this request pointed at -- was confirmed via
+  // live research to have been FULLY RETIRED July 30, 2026 (playground, catalog, inference API,
+  // and BYOK all shut down; Microsoft's own successor pointer is Azure AI Foundry, a different
+  // product from the existing "azure" entry above). Rather than ship a dead endpoint labeled
+  // "GitHub Copilot", these 4 real, currently-operating providers were added instead --
+  // confirmed live via research, not guessed.
+  moonshot: OPENAI_COMPAT("moonshot", "Moonshot AI (Kimi)", "https://api.moonshot.ai/v1", "kimi-k3", "OpenAI-compatible, confirmed live. Mainland China accounts use a separate api.moonshot.cn host -- not handled here (international endpoint only)."),
+  minimax: OPENAI_COMPAT("minimax", "MiniMax", "https://api.minimax.io/v1", "MiniMax-M3", "OpenAI-compatible, confirmed live. Mainland China accounts use a separate api.minimaxi.com host -- not handled here (international endpoint only)."),
+  baseten: OPENAI_COMPAT("baseten", "Baseten Model APIs", "https://inference.baseten.co/v1", "deepseek-ai/DeepSeek-V3.2", "Public open-weight model catalog (Kimi, DeepSeek, GLM, Nemotron, ...), OpenAI-compatible, confirmed live real GET /v1/models."),
+  nebius: OPENAI_COMPAT("nebius", "Nebius Token Factory", "https://api.tokenfactory.nebius.com/v1", "deepseek-ai/DeepSeek-R1-0528", "Confirmed live -- the successor product to the retired \"Nebius AI Studio\" brand (that name's own API keys stopped working Jan 31, 2026). OpenAI-compatible."),
+  // User-requested addition (tokenharbor.ai/models). Confirmed via the real docs: OpenAI-compatible
+  // (POST https://tokenharbor.ai/v1/chat/completions, Bearer thk_live_... key), real GET /v1/models
+  // endpoint documented ("returns the same data as JSON for SDKs that pre-fetch the catalog"). A
+  // multi-vendor router exposing Claude/GPT/GLM/Grok/Kimi/Qwen models under tokenharbor/MODEL_ID
+  // ids. Default set to th-orchestra -- their own real routing model, explicitly documented as
+  // "built for tool-using agent clients" / "agentic coding", the best fit for Dave's own
+  // tool-calling architecture rather than guessing at one specific upstream vendor's id.
+  // Real bug fixed: this note originally wrote "tokenharbor/<model>" -- a literal, unescaped
+  // "<model>" sent straight into a real parse_mode:"HTML" Telegram message (providerDetailView)
+  // reads as an invalid HTML start tag, which the real Bot API rejects with a 400 "can't parse
+  // entities" error -- exactly what surfaced to the user as "Something went wrong on my end."
+  tokenharbor: OPENAI_COMPAT("tokenharbor", "Token Harbor", "https://tokenharbor.ai/v1", "th-orchestra", "OpenAI-compatible per real docs (drop-in /v1/chat/completions + documented /v1/models). Also exposes vendor models directly as tokenharbor/MODEL_ID (e.g. tokenharbor/qwen3-max) if a specific upstream model is preferred over the router."),
+  // User-requested addition (kiraai.vn/models). Confirmed via the real docs (kiraai.vn/documents):
+  // OpenAI-SDK-compatible base https://kiraai.vn/api/v1 (their own real Node.js sample constructs
+  // `new OpenAI({ baseURL: "https://kiraai.vn/api/v1", apiKey: "YOUR_KIRA_API_KEY" })`), Bearer auth.
+  // Default set to kira-3.5-flash -- their own docs explicitly call this their default chat model.
+  // Other real chat models: kira-3.5-pro, kira-2.5-pro, kira-mini-1.0 (free tier).
+  kiraai: OPENAI_COMPAT("kiraai", "Kira AI", "https://kiraai.vn/api/v1", "kira-3.5-flash", "OpenAI-SDK-compatible per real docs (drop-in /v1/chat/completions). Other real chat models: kira-3.5-pro, kira-2.5-pro, kira-mini-1.0 (free tier)."),
+  // User-requested addition, real endpoint/model list provided directly by the user (not
+  // independently researched beyond confirming api.xpiki.com also serves a separate, unrelated
+  // image-generation product at /v1/images -- text/chat is a distinct real capability at this
+  // same host). OpenAI-compatible per the user's own stated usage instructions: base
+  // https://api.xpiki.com/v1, Bearer sk-... auth, chat/completions shape. No independently-
+  // confirmed /v1/models list endpoint -- manual model entry, same posture as OpenRouter/Z.AI,
+  // rather than guessing one. Model ids are Claude-family names (opus/sonnet/haiku/fable) routed
+  // through xpiki's own infrastructure -- default set to claude-sonnet-5, the mid-tier real model
+  // from the user's own provided list.
+  xpiki: { ...OPENAI_COMPAT("xpiki", "Xpiki", "https://api.xpiki.com/v1", "claude-sonnet-5", "OpenAI-compatible per the user's own provided usage instructions (Bearer sk-... key, /v1/chat/completions). Also exposes claude-opus-5, claude-opus-4-8, claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5, claude-fable-5. GET /v1/models CONFIRMED LIVE 2026-09-19 (real 401 invalid_api_key for a bogus key, not a 404) -- auto-fetch enabled.", "/models"), manualModelEntry: false },
+  custom: {
+    id: "custom",
+    displayName: "Custom (OpenAI-compatible)",
+    baseUrl: "",
+    chatPath: "/chat/completions",
+    modelsPath: null,
+    authStyle: "bearer",
+    manualModelEntry: true,
+    defaultModel: "",
+    openAICompatible: true,
+    notes: "Update 4 -- a user-defined provider (see custom-providers.ts), not a static catalog entry with a fixed base URL.",
+  },
+  cohere: {
+    id: "cohere",
+    displayName: "Cohere",
+    baseUrl: "https://api.cohere.com/v2",
+    chatPath: "/chat",
+    modelsPath: null,
+    authStyle: "bearer",
+    manualModelEntry: false,
+    defaultModel: "command-a",
+    openAICompatible: false,
+    notes: "Confirmed NOT OpenAI-shaped -- v2 has its own request/response shape (response.message.content[0].text).",
+  },
+  // Research pass, 2026-09-14: 9 new real, currently-operating, OpenAI-compatible providers
+  // added, each verified via that vendor's own live docs before being added (not guessed).
+  // Candidates researched but rejected: Chutes.ai (base URL is genuinely inconsistent across
+  // docs -- a generic https://llm.chutes.ai/v1 vs. per-deployment <user>-<chute>.chutes.ai
+  // subdomains, no single stable base to hardcode); Targon (no live, current documentation
+  // found confirming a real base URL/chat path); 01.AI/Yi (conflicting low-quality sources on
+  // whether the platform is still fully operating after a reported service interruption);
+  // Reka AI (no first-party base URL found -- only reachable via third-party resellers);
+  // Writer/Palmyra (real product, but its real chat endpoint is /v1/chat, not the standard
+  // /chat/completions shape this file's OPENAI_COMPAT factory assumes -- would need a bespoke
+  // non-OpenAI-compatible entry, skipped rather than mislabel it); IBM watsonx.ai (real
+  // OpenAI-compatible Model Gateway exists, but primary auth is IBM Cloud IAM -- hourly-
+  // refreshed bearer tokens obtained via a separate IAM exchange, not a static key used
+  // directly as Authorization: Bearer -- doesn't fit this catalog's simple bearer auth style
+  // without deeper design, skipped rather than misrepresent it).
+  friendli: {
+    ...OPENAI_COMPAT(
+      "friendli",
+      "Friendli AI",
+      "https://api.friendli.ai/serverless/v1",
+      "zai-org/GLM-5.3",
+      "Confirmed real via docs.friendli.ai/guides/serverless_endpoints/openai_compatibility: Friendli Serverless Endpoints are genuinely OpenAI-SDK-compatible, migrate by swapping base_url + api_key. Open marketplace catalog (Llama, GLM, and others) with no single fixed flagship. No independently-confirmed /v1/models list page found in the docs -- manual model entry, not guessed. GET /serverless/v1/models CONFIRMED LIVE 2026-09-19 -- returns a real HTTP 200 catalog unauthenticated (zai-org/GLM-5.3, GLM-5.3-Flash, GLM-5.2, GLM-5.1, google/gemma-4-31B-it, deepseek-ai/DeepSeek-V3.2, MiniMaxAI/MiniMax-M2.5). Auto-fetch enabled; default updated because the old meta-llama-3.1-8b-instruct id is no longer in that real catalog.",
+      "/models"
+    ),
+    manualModelEntry: false,
+  },
+  siliconflow: OPENAI_COMPAT(
+    "siliconflow",
+    "SiliconFlow",
+    "https://api.siliconflow.cn/v1",
+    "deepseek-ai/DeepSeek-V3",
+    "Confirmed real via docs.siliconflow.com/en/api-reference/models/get-model-list: a real, documented GET /v1/models exists. Fully OpenAI-compatible chat/completions; model ids are vendor-namespaced (e.g. Qwen/Qwen3-8B, deepseek-ai/DeepSeek-V3), confirmed 2026-09-14."
+  ),
+  upstage: {
+    ...OPENAI_COMPAT(
+      "upstage",
+      "Upstage (Solar)",
+      "https://api.upstage.ai/v1",
+      "solar-pro4",
+      "Confirmed real via upstage.ai/blog/en/solar-pro-4 and the Upstage Console docs: chat/completions is genuinely OpenAI-compatible at api.upstage.ai/v1, model id solar-pro4 is Upstage's own current documented flagship (524K context, agentic/coding-focused). No confirmed /v1/models list doc page found -- manual model entry rather than guessing one, confirmed 2026-09-14. GET /v1/models CONFIRMED LIVE 2026-09-19 (real 401 naming the Upstage console key page for a bogus key -- a real key-validating route). Auto-fetch enabled.",
+      "/models"
+    ),
+    manualModelEntry: false,
+  },
+  venice: OPENAI_COMPAT(
+    "venice",
+    "Venice AI",
+    "https://api.venice.ai/api/v1",
+    "venice-uncensored-1-2",
+    "Confirmed real via docs.venice.ai/api-reference/endpoint/models/list (a real, documented List Models endpoint) and docs.venice.ai/api-reference/api-spec: genuinely mirrors the OpenAI API shape at /chat/completions, Bearer auth confirmed (an alternate x402-wallet auth header also exists but Bearer is the documented primary path). Default set to Venice's own distinguishing uncensored model rather than a generic open-weight one, confirmed 2026-09-14.",
+    "/models"
+  ),
+  scaleway: OPENAI_COMPAT(
+    "scaleway",
+    "Scaleway Generative APIs",
+    "https://api.scaleway.ai/v1",
+    "llama-3.3-70b-instruct",
+    "Confirmed real via scaleway.com/en/docs/generative-apis (chat API + models API pages): explicitly documented as a drop-in OpenAI replacement, real GET /v1/models confirmed. Default upgraded from Scaleway's own smaller llama-3.1-8b-instruct default to the more capable llama-3.3-70b-instruct, also real and currently listed, confirmed 2026-09-14.",
+    "/models"
+  ),
+  lambda: OPENAI_COMPAT(
+    "lambda",
+    "Lambda AI (Inference API)",
+    "https://api.lambda.ai/v1",
+    "deepseek-r1",
+    "Confirmed real via docs.lambda.ai/public-cloud/lambda-inference-api/ and lambda.ai/inference-models/deepseek-r1: genuinely OpenAI-compatible chat/completions, real documented GET /v1/models, flat-string model ids (deepseek-r1, llama3.3-70b-instruct-fp8, ...). Confirmed 2026-09-14.",
+    "/models"
+  ),
+  nscale: {
+    ...OPENAI_COMPAT(
+      "nscale",
+      "Nscale Serverless Inference",
+      "https://inference.api.nscale.com/v1",
+      "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+      "Confirmed real via docs.nscale.com/docs/ai-services/models: genuinely OpenAI-compatible chat/completions across Llama/Qwen/DeepSeek/GPT-OSS/Mistral, real GET /v1/models for programmatic model discovery. Default model id confirmed live in the docs' own examples, confirmed 2026-09-14. Real limitation confirmed live 2026-09-20 from the server's own error body: it rejects the named-function form of tool_choice with HTTP 400 INVALID_TOOL_CHOICE (\"Supported tool_choice values are \\\"auto\\\" and \\\"none\\\" currently\"), so it is marked auto-only -- a forced tool choice degrades to \"auto\" rather than being rejected outright.",
+      "/models"
+    ),
+    toolChoiceStyle: "auto-only",
+  },
+  parasail: OPENAI_COMPAT(
+    "parasail",
+    "Parasail",
+    "https://api.parasail.io/v1",
+    "parasail-deepseek-r1",
+    "Confirmed real via docs.parasail.io/parasail-docs/api-reference/chat-completions: genuinely OpenAI-compatible (official OpenAI-SDK example shown with this exact base_url and model id), real documented GET /v1/models. Confirmed 2026-09-14.",
+    "/models"
+  ),
+  poe: {
+    ...OPENAI_COMPAT(
+      "poe",
+      "Poe API",
+      "https://api.poe.com/v1",
+      "claude-sonnet-4.6",
+      "Re-verified via a full crawl of creator.poe.com/docs (openai-compatible-api, external-application-guide, api-reference) PLUS a real live unauthenticated curl against https://api.poe.com/v1/chat/completions, which returned a real HTTP 400 {error:{type:\"authentication_error\",code:\"missing_api_key\"}} -- proves the base URL/chat path genuinely resolve, not just docs-guessed. Base URL, /chat/completions path, and Bearer auth (Authorization: Bearer $POE_API_KEY) all confirmed byte-for-byte against the docs' own curl example, including the exact default model id \"Claude-Sonnet-4.6\". Real tool-calling IS genuinely supported through this endpoint (docs' own compatibility table: tools/tool_choice/parallel_tool_calls all \"Fully Supported\") -- NOT chat-only, safe for Dave's tool-heavy agent loop. One real, confirmed caveat that matters for tool-calling reliability: the `strict` param is ignored server-side, so a Poe tool_call's JSON arguments are NOT guaranteed to conform to the supplied JSON Schema (may have missing/extra fields) -- callers of this provider should treat parsed tool-call arguments defensively. Other confirmed-real gaps vs vanilla OpenAI: `response_format`/structured outputs (json_schema) is ignored, not honored; audio input is stripped/ignored; only PUBLIC bots are reachable (private bots return an error); image/video/audio bots should be called with stream=false. Rate limit: 500 req/min/user, real Retry-After-compatible 429s (already handled generically by providerErrorFromResponse). No /v1/models list endpoint documented -- the bot catalog is enormous and partly per-account/community-created, so manual model entry is required (same posture as openrouter/orcarouter), not guessed. Confirmed 2026-09-14. GET /v1/models CONFIRMED LIVE 2026-09-19 -- real HTTP 200 with 341 bots. Auto-fetch enabled. Default corrected to the real lowercase id claude-sonnet-4.6 -- the docs write it capitalised, but the live catalog is lowercase and the id is case-sensitive.",
+      "/models"
+    ),
+    manualModelEntry: false,
+  },
+  chutes: { ...OPENAI_COMPAT("chutes", "Chutes", "https://llm.chutes.ai/v1", "deepseek-ai/DeepSeek-V3-0324", "Decentralised open-model inference (Bittensor). verified live 2026-09-30: a bogus key gets a real 401/403 from https://llm.chutes.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  featherless: { ...OPENAI_COMPAT("featherless", "Featherless", "https://api.featherless.ai/v1", "meta-llama/Meta-Llama-3.1-8B-Instruct", "Flat-rate serverless access to thousands of open Hugging Face models. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.featherless.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  inferencenet: { ...OPENAI_COMPAT("inferencenet", "Inference.net", "https://api.inference.net/v1", "meta-llama/llama-3.3-70b-instruct/fp-8", "Low-cost open-model inference. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.inference.net/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  requesty: { ...OPENAI_COMPAT("requesty", "Requesty", "https://router.requesty.ai/v1", "openai/gpt-4o-mini", "Router across many providers (provider/model ids) -- type the model id. verified live 2026-09-30: a bogus key gets a real 401/403 from https://router.requesty.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: true },
+  aimlapi: { ...OPENAI_COMPAT("aimlapi", "AI/ML API", "https://api.aimlapi.com/v1", "alibaba/qwen3.8-flash", "One key for ~970 models; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.aimlapi.com/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  vercelgateway: { ...OPENAI_COMPAT("vercelgateway", "Vercel AI Gateway", "https://ai-gateway.vercel.sh/v1", "openai/gpt-4o-mini", "Vercel's gateway to many providers (provider/model ids) -- type the model id. verified live 2026-09-30: a bogus key gets a real 401/403 from https://ai-gateway.vercel.sh/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: true },
+  stepfun: { ...OPENAI_COMPAT("stepfun", "StepFun", "https://api.stepfun.ai/v1", "step-2-16k", "StepFun's own Step models (international endpoint). verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.stepfun.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  avian: { ...OPENAI_COMPAT("avian", "Avian", "https://api.avian.io/v1", "deepseek/deepseek-v3.2", "Fast open-model inference; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.avian.io/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  glama: { ...OPENAI_COMPAT("glama", "Glama", "https://glama.ai/api/gateway/openai/v1", "openai/gpt-4o-mini", "Gateway to many providers -- type the model id. verified live 2026-09-30: a bogus key gets a real 401/403 from https://glama.ai/api/gateway/openai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: true },
+  ollamacloud: { ...OPENAI_COMPAT("ollamacloud", "Ollama Cloud", "https://ollama.com/v1", "kimi-k2.6", "Ollama's hosted cloud models; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://ollama.com/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  hunyuan: { ...OPENAI_COMPAT("hunyuan", "Tencent Hunyuan", "https://api.hunyuan.cloud.tencent.com/v1", "hunyuan-turbos-latest", "Tencent's Hunyuan models, OpenAI-compatible endpoint. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.hunyuan.cloud.tencent.com/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  ai302: { ...OPENAI_COMPAT("ai302", "302.AI", "https://api.302.ai/v1", "gpt-4o-mini", "Aggregator of many providers -- type the model id. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.302.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: true },
+  digitalocean: { ...OPENAI_COMPAT("digitalocean", "DigitalOcean Gradient", "https://inference.do-ai.run/v1", "llama3.3-70b-instruct", "DigitalOcean's serverless inference (model access key). verified live 2026-09-30: a bogus key gets a real 401/403 from https://inference.do-ai.run/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  iointelligence: { ...OPENAI_COMPAT("iointelligence", "IO Intelligence", "https://api.intelligence.io.solutions/api/v1", "meta-llama/Llama-3.3-70B-Instruct", "io.net's open-model inference. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.intelligence.io.solutions/api/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  cometapi: { ...OPENAI_COMPAT("cometapi", "CometAPI", "https://api.cometapi.com/v1", "gpt-4o-mini", "Aggregator of many providers -- type the model id. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.cometapi.com/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: true },
+  zenmux: { ...OPENAI_COMPAT("zenmux", "ZenMux", "https://zenmux.ai/api/v1", "qwen/qwen3.8-flash", "Router with ~200 models; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://zenmux.ai/api/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  arliai: { ...OPENAI_COMPAT("arliai", "Arli AI", "https://api.arliai.com/v1", "Mistral-Nemo-12B-Instruct-2407", "Flat-rate open-model inference. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.arliai.com/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  nanogpt: { ...OPENAI_COMPAT("nanogpt", "NanoGPT", "https://nano-gpt.com/api/v1", "qwen/qwen3.8-max-prime", "Pay-per-prompt access to ~600 models; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://nano-gpt.com/api/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  atlascloud: { ...OPENAI_COMPAT("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "deepseek-ai/deepseek-v3.2", "Open-model inference; default taken from its own public model list 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401/403 from https://api.atlascloud.ai/v1/chat/completions (not a 404), so the base URL and /chat/completions path are real."), manualModelEntry: false },
+  gwarden: { ...OPENAI_COMPAT("gwarden", "Gwarden AI", "https://gwarden.su/v1", "kimi-k3", "One key for ~30 models (Kimi, GLM, DeepSeek, Qwen, GPT, Grok, Gemini and more); keys look like GWAR-XXXX; tool calling supported. Free tier: $6 of credit refilled every 5 hours. Added at the trader's request 2026-09-30. verified live 2026-09-30: a bogus key gets a real 401 invalid_api_key from https://gwarden.su/v1/chat/completions, and /v1/models lists the models."), manualModelEntry: false },
+  runware: { ...OPENAI_COMPAT("runware", "Runware", "https://api.runware.ai/v1", "minimax:m2.7@0", "One key for many LLMs (MiniMax, Gemini, GPT, Claude, open models) on an OpenAI-compatible endpoint. Models are Runware AIR IDs like minimax:m2.7@0 or google:gemini@3.1-pro, fetched from /v1/models with your key. Added at the trader's request 2026-10-02; verified live: a bogus key gets a real 401 invalid_api_key from both https://api.runware.ai/v1/chat/completions and /v1/models."), manualModelEntry: false },
+  infron: { ...OPENAI_COMPAT("infron", "Infron", "https://llm.onerouter.pro/v1", "deepseek/deepseek-v4-pro", "One key for ~470 models (Claude, GPT-6, Gemini, DeepSeek, GLM, Kimi, image/video models too) on an OpenAI-compatible endpoint (infron.ai/docs). Added at the trader's request 2026-10-03; verified live: /v1/models lists the models publicly and a bogus key gets a real 401 from https://llm.onerouter.pro/v1/chat/completions."), manualModelEntry: false },
+  githubmodels: { ...OPENAI_COMPAT("githubmodels", "GitHub Models", "https://models.github.ai/inference", "openai/gpt-4.1-mini", "GitHub's model catalog; the key is a GitHub personal access token with the models:read permission. Free tier has tight daily limits -- better as a backup. Added at the trader's request 2026-09-30; NOT live-verified from the build sandbox (its network filter answers every github.com request with a stub \"OK\"), so use Test this key after adding. The model list lives at /catalog/models (outside the inference base), so model ids are typed: publisher/model, e.g. openai/gpt-4.1.", null), manualModelEntry: true },
+};
+
+export function resolveProviderAlias(name: ProviderName): ProviderName {
+  const entry = PROVIDER_CATALOG[name];
+  return entry.aliasOf ?? name;
+}
+
+export function listProviderCatalog(): ProviderCatalogEntry[] {
+  return Object.values(PROVIDER_CATALOG);
+}

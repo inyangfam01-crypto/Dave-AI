@@ -1,0 +1,29 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/dave-memory" },
+    { "path": "packages/dave-brain" },
+    { "path": "packages/dave-sandbox" },
+    { "path": "packages/dave-davema" },
+    { "path": "packages/dave-telegram" },
+    { "path": "packages/dave-trading" },
+    { "path": "packages/dave-ea-bridge" },
+    { "path": "packages/dave-workers" },
+    { "path": "packages/dave-core" },
+    { "path": "packages/dave-io" },
+    { "path": "packages/dave-db" },
+    { "path": "packages/dave-self-improve" },
+    { "path": "packages/dave-feedback" },
+    { "path": "packages/dave-safety" },
+    { "path": "packages/dave-crypto" },
+    { "path": "packages/dave-vision" },
+    { "path": "packages/dave-notifications" },
+    { "path": "packages/dave-lovable-mcp" },
+    { "path": "packages/dave-agent-loop" },
+    { "path": "packages/dave-skills" },
+    { "path": "packages/dave-e2b" },
+    { "path": "packages/dave-knowledge" },
+    { "path": "packages/dave-mcp-manager" },
+    { "path": "packages/dave-firecrawl" }
+  ]
+}

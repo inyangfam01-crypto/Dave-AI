@@ -1,0 +1,159 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { coloredButton, keyboard, type InlineKeyboardMarkup } from "@dave/telegram";
+import type { BusyState } from "./busy-state.js";
+
+/**
+ * Real gap fixed (user: "if a new request comes in while Dave is busy with something else,
+ * Dave doesn't just silently switch or silently ignore it. It estimates roughly how long the
+ * competing task will take, then sends a message with 3 colored buttons: Pause and do it
+ * myself / Hand it to a worker / Skip it"). This is the "a second message arrived while busy"
+ * half: the new message's real content is held here until the user picks one of the three
+ * real options, rather than either silently interleaving both or silently dropping the new one.
+ */
+export interface PendingDelegation {
+  text: string;
+  chatId: number;
+  /** When this message actually arrived. Load-bearing -- see PENDING_DELEGATION_MAX_AGE_MS. */
+  receivedAt: number;
+  /** The Telegram message id, so the eventual answer can be tagged as a real reply to it.
+   *  Optional: entries queued before this field existed are still on disk and must keep loading. */
+  messageId?: number;
+}
+
+/**
+ * Real bug fixed (the trader, live, with their own timeline: "what's my balance" at 10:01, "wassup"
+ * at 10:53, "pending orders" at 10:58, then "hello" -- "it just as if the message send previously
+ * was sent now, so it keeps like telling me your balance is this pending orders is this that").
+ *
+ * The queue had no notion of age and was drained ONLY by a button tap. A delegation prompt's
+ * buttons stay tappable in Telegram forever, and the busy flag that created the prompt self-heals
+ * after 15 minutes (busy-state.ts) -- so the message that queued at 10:01 was never answered, just
+ * sat on disk. Later messages went through normally while it waited. Whenever that old button was
+ * finally tapped -- or another message queued behind it and drained the backlog -- Dave answered
+ * the whole stale pile at once, reporting a balance and pending orders the trader had asked about
+ * nearly an hour earlier, reading exactly like the bot repeating itself at random.
+ *
+ * A queued message is only worth answering while the person is still waiting on it. Past this, they
+ * have moved on (and, in the real timeline above, have usually already asked again and been
+ * answered). Tied to the user-turn busy ceiling deliberately: beyond that the turn that caused the
+ * queue is itself treated as dead, so anything still queued behind it is waiting on nothing.
+ */
+export const PENDING_DELEGATION_MAX_AGE_MS = 15 * 60_000;
+
+/**
+ * Real bug fixed (the trader, live, with his own timeline: "hi" around 10:11, "trade" around
+ * 10:21, "pending" around 10:22 -- "it likes send all of that to the bot which is not good", and
+ * the bot then "kept on repeating what he just sent"). The delegate:pause handler used to run a
+ * SEPARATE full agent turn per queued message, so three messages sent minutes apart fired three
+ * complete turns back to back, each re-reading the same history and re-answering from scratch.
+ * That is exactly how one trade question produced four near-identical essays.
+ *
+ * A person coming back to three missed messages answers them ONCE, together. This collapses the
+ * backlog per chat, preserving the original send order, so the caller runs one turn per chat
+ * instead of one per message.
+ */
+export interface CollapsedDelegation {
+  chatId: number;
+  /** The single prompt to run -- the message verbatim when there is only one, so a lone queued
+   *  message is never wrapped in backlog scaffolding it does not need. */
+  text: string;
+  /** How many real messages this represents, for the caller's own acknowledgement copy. */
+  count: number;
+  /** Which message the single collapsed answer should be tagged as replying to: the LAST of the
+   *  backlog, i.e. the most recent thing they asked. Tagging the first would point at the oldest
+   *  message in a pile they have since moved past, and one collapsed answer can only tag one.
+   *  Undefined when no queued entry carried an id. */
+  replyToMessageId?: number;
+}
+
+export function collapseQueuedMessages(queue: PendingDelegation[]): CollapsedDelegation[] {
+  const byChat = new Map<number, PendingDelegation[]>();
+  for (const item of queue) {
+    const existing = byChat.get(item.chatId);
+    if (existing) existing.push(item);
+    else byChat.set(item.chatId, [item]);
+  }
+  return [...byChat.entries()].map(([chatId, items]) => {
+    const texts = items.map((i) => i.text);
+    return {
+      chatId,
+      count: texts.length,
+      replyToMessageId: [...items].reverse().find((i) => i.messageId !== undefined)?.messageId,
+      text:
+        texts.length === 1
+          ? texts[0]
+          : `While you were busy I sent you these, in this order -- answer them together in ONE reply, don't repeat yourself once per message:\n` +
+            texts.map((t, i) => `${i + 1}. ${t}`).join("\n"),
+    };
+  });
+}
+
+function delegationPath(userId: string): string {
+  return join(process.env.DAVE_DATA_ROOT ?? process.cwd(), "data", "agent-loop", userId, "pending-delegation.json");
+}
+
+/** Real bug fixed (user, live: two messages minutes apart got answered "bundled" together --
+ *  root-caused to this file overwriting, not queueing). A THIRD message arriving before the user
+ *  ever answered the button prompt for the SECOND used to silently discard it (this file held
+ *  exactly one entry, and setPendingDelegation always replaced it). Every message that arrives
+ *  while busy is now appended, never dropped -- the storage shape is an array. */
+function readDelegationQueue(userId: string): PendingDelegation[] {
+  const path = delegationPath(userId);
+  if (!existsSync(path)) return [];
+  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  const raw: PendingDelegation[] = Array.isArray(parsed)
+    ? (parsed as PendingDelegation[])
+    : // Back-compat with the old single-object shape, in case a file from before this fix is read.
+      parsed
+      ? [parsed as PendingDelegation]
+      : [];
+
+  // An entry written before receivedAt existed is, by definition, from a previous deploy -- older
+  // than any live turn could be. Treated as expired rather than replayed at the user.
+  const cutoff = Date.now() - PENDING_DELEGATION_MAX_AGE_MS;
+  return raw.filter((item) => typeof item.receivedAt === "number" && item.receivedAt > cutoff);
+}
+
+function writeDelegationQueue(userId: string, queue: PendingDelegation[]): void {
+  const path = delegationPath(userId);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(queue), "utf8");
+}
+
+/** Appends a new message to the queue rather than replacing whatever was already pending. Expired
+ *  entries are dropped on the way through, so the file self-prunes instead of growing forever. */
+export function addPendingDelegation(userId: string, delegation: Omit<PendingDelegation, "receivedAt"> & { receivedAt?: number }): void {
+  const queue = readDelegationQueue(userId);
+  queue.push({ ...delegation, receivedAt: delegation.receivedAt ?? Date.now() });
+  writeDelegationQueue(userId, queue);
+}
+
+/** Clears the whole queue -- used once the user has picked an option for it. */
+export function clearPendingDelegation(userId: string): void {
+  writeDelegationQueue(userId, []);
+}
+
+/** Every message that queued up while busy, oldest first. Empty array, never null, when there's
+ *  nothing pending -- callers no longer need to special-case null vs. an empty list. */
+export function getPendingDelegationQueue(userId: string): PendingDelegation[] {
+  return readDelegationQueue(userId);
+}
+
+/** Honest, rough estimate -- no historical per-task-type timing data exists to draw on, so
+ * this reports what's actually knowable (elapsed time so far) rather than fabricating a
+ * confident-sounding prediction it has no real basis for. */
+export function describeBusyDuration(busy: BusyState, now = Date.now()): string {
+  const elapsedSec = Math.round((now - busy.startedAt) / 1000);
+  return elapsedSec < 5 ? "just started" : `running for about ${elapsedSec}s so far`;
+}
+
+export function buildDelegationPrompt(busy: BusyState): { text: string; reply_markup: InlineKeyboardMarkup } {
+  const text = `Still finishing your last message: ${busy.taskDescription} (${describeBusyDuration(busy)}). You sent something new -- want me to pause and do it myself, hand it to a worker, or skip it?`;
+  const reply_markup = keyboard([
+    [coloredButton("Pause and do it myself", "blue", "delegate:pause"), coloredButton("Hand it to a worker", "green", "delegate:worker")],
+    [coloredButton("Skip it", "red", "delegate:skip")],
+  ]);
+  return { text, reply_markup };
+}

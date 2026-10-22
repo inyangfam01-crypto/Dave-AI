@@ -1,0 +1,275 @@
+import 'package:flutter/cupertino.dart';
+
+import '../api/models.dart';
+import '../theme.dart';
+import '../widgets/common.dart';
+import 'mt5_screen.dart';
+import '../look.dart';
+
+/// MetaTrader 5 in Dave's own container: the account it's logged into, the EA's chart, how often
+/// the EA reports, and a restart. The same controls as /mt5 in Telegram.
+///
+/// The password is typed into a hidden field and sent to the server once; it goes straight to the
+/// container and is never shown or stored on the phone.
+class Mt5Page extends StatelessWidget {
+  const Mt5Page({super.key});
+
+  @override
+  Widget build(BuildContext context) => LoadedPage<Mt5View>(
+        title: 'MetaTrader 5',
+        load: (api) => api.mt5(),
+        builder: (context, v, reload) {
+          Future<void> act(String action, [Map<String, Object?> fields = const {}]) async {
+            if (await runAction(context, (api) => api.mt5Action(action, fields))) await reload();
+          }
+
+          final tone = !v.hasAgent || !v.configured
+              ? CupertinoColors.systemGrey
+              : v.login == 'logged-in' && v.running
+                  ? CupertinoColors.systemGreen
+                  : v.login == 'failed' || !v.running
+                      ? CupertinoColors.systemRed
+                      : CupertinoColors.systemOrange;
+          final a = v.account;
+          return [
+            SliverToBoxAdapter(
+              child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                header: const ListHeader('Status'),
+                footer: const ListFooter('MetaTrader 5 runs next to Dave with his EA already on a chart, so you don\'t need a Windows VPS.'),
+                children: [
+                  CupertinoListTile(
+                    leading: Icon(CupertinoIcons.circle_fill, size: 12, color: resolve(context, tone)),
+                    title: Text(v.summary, maxLines: 4),
+                  ),
+                  if (a != null)
+                    CupertinoListTile(
+                      leading: const Icon(CupertinoIcons.person_crop_circle),
+                      title: Text(v.accountName ?? 'Account ${a.login}'),
+                      subtitle: Text('${a.login} · ${a.server}', maxLines: 2),
+                    ),
+                  if (v.lastReportAt != null) CupertinoListTile(title: const Text('EA last reported'), additionalInfo: Text(formatAgo(v.lastReportAt!))),
+                ],
+              ),
+            ),
+            if (!v.hasAgent)
+              SliverToBoxAdapter(
+                child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                  header: const ListHeader('Not set up yet'),
+                  footer: const ListFooter('The MT5 service has to be added next to Dave on the server first. After that, all you enter here is your MT5 login, password and server.'),
+                  children: const [CupertinoListTile(title: Text('Waiting for the MT5 service'))],
+                ),
+              )
+            else ...[
+              SliverToBoxAdapter(
+                child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                  header: const ListHeader('Account'),
+                  footer: const ListFooter('Dave compiles his EA, starts MT5 logged in, and puts the EA on a chart. Connecting takes a minute or two.'),
+                  children: [
+                    if (v.configured)
+                      CupertinoListTile(
+                        leading: Icon(CupertinoIcons.desktopcomputer, color: Look.of(context).accent),
+                        title: Text('Open the MT5 screen', style: TextStyle(color: Look.of(context).accent)),
+                        subtitle: const Text('Live, with touch as the mouse -- like a VPS'),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () => pushScoped<void>(context, const Mt5ScreenPage()),
+                      ),
+                    CupertinoListTile(
+                      leading: Icon(CupertinoIcons.person_crop_circle_badge_plus, color: Look.of(context).accent),
+                      title: Text(v.configured ? 'Change account' : 'Connect account', style: TextStyle(color: Look.of(context).accent)),
+                      onTap: v.installed ? () => _connect(context, act) : null,
+                    ),
+                  ],
+                ),
+              ),
+              if (v.accounts.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4),
+                    header: const ListHeader('Switch account'),
+                    footer: const ListFooter('Accounts you connected before. Tap one to switch MT5 to it -- the password is kept encrypted on your server, so you don\'t type it again. Switching restarts MT5, about a minute.'),
+                    children: [
+                      for (final acc in v.accounts)
+                        CupertinoListTile(
+                          leading: Icon(acc.active ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle, color: acc.active ? Look.of(context).accent : resolve(context, CupertinoColors.tertiaryLabel)),
+                          title: Text(acc.name ?? 'Account ${acc.login}'),
+                          subtitle: Text('${acc.login} · ${acc.server}${acc.active ? '  ·  in use' : ''}'),
+                          onTap: () async {
+                            final choice = await showCupertinoModalPopup<String>(
+                              context: context,
+                              builder: (ctx) => CupertinoActionSheet(
+                                title: Text(acc.name ?? 'Account ${acc.login}'),
+                                message: Text('${acc.login} on ${acc.server}'),
+                                actions: [
+                                  if (!acc.active) CupertinoActionSheetAction(isDefaultAction: true, onPressed: () => Navigator.pop(ctx, 'switch'), child: const Text('Switch MT5 to this account')),
+                                  CupertinoActionSheetAction(isDestructiveAction: true, onPressed: () => Navigator.pop(ctx, 'forget'), child: const Text('Forget this account')),
+                                ],
+                                cancelButton: CupertinoActionSheetAction(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                              ),
+                            );
+                            if (choice == null || !context.mounted) return;
+                            await act(choice, {'login': acc.login, 'server': acc.server});
+                          },
+                        ),
+                      CupertinoListTile(
+                        leading: Icon(CupertinoIcons.add_circled, color: Look.of(context).accent),
+                        title: Text('Add another account', style: TextStyle(color: Look.of(context).accent)),
+                        onTap: v.installed ? () => _connect(context, act) : null,
+                      ),
+                    ],
+                  ),
+                ),
+              if (v.configured && a != null)
+                SliverToBoxAdapter(
+                  child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                    header: const ListHeader('Market Watch'),
+                    footer: const ListFooter('The pairs MT5 has in Market Watch. Each one gets its own chart. Changing them restarts MT5 on the same account.'),
+                    children: [
+                      CupertinoListTile(
+                        title: const Text('Pairs'),
+                        subtitle: Text(v.marketWatch.isEmpty ? 'Only the EA\'s chart' : v.marketWatch.join(', '), maxLines: 3),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () async {
+                          final s = await promptText(context,
+                              title: 'Market Watch', message: 'Pairs separated by commas, exactly as your broker names them.', initial: v.marketWatch.join(', '), placeholder: 'VOL_80, BOOM_100, EURUSD');
+                          if (s == null || !context.mounted) return;
+                          if (s.trim().isEmpty) return showError(context, 'Enter at least one pair.');
+                          await act('settings', {'marketWatch': s});
+                        },
+                      ),
+                      if (v.pairGroup.isNotEmpty && v.pairGroup.join(',') != v.marketWatch.join(','))
+                        CupertinoListTile(
+                          leading: Icon(CupertinoIcons.square_stack_3d_up, color: Look.of(context).accent),
+                          title: Text('Use my pair group', style: TextStyle(color: Look.of(context).accent)),
+                          subtitle: Text(v.pairGroup.join(', '), maxLines: 2),
+                          onTap: () => act('settings', {'marketWatch': v.pairGroup}),
+                        ),
+                    ],
+                  ),
+                ),
+              if (v.configured && a != null)
+                SliverToBoxAdapter(
+                  child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                    header: const ListHeader('MT5 phone alerts'),
+                    footer: const ListFooter(
+                        'Your MetaQuotes ID lets MT5 itself push trade alerts to the MetaTrader 5 app on your phone. Find it in that app under Settings > Messages: 8 letters and digits.'),
+                    children: [
+                      CupertinoListTile(
+                        title: const Text('MetaQuotes ID'),
+                        additionalInfo: Text(v.metaquotesIds.isEmpty ? 'Off' : v.metaquotesIds.join(', ')),
+                        subtitle: v.metaquotesIds.isEmpty ? null : Text(_pushLine(v), maxLines: 2),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () async {
+                          final s = await promptText(context,
+                              title: 'MetaQuotes ID', message: 'From the MT5 app: Settings > Messages. Leave empty to turn MT5 phone alerts off.', initial: v.metaquotesIds.join(', '), placeholder: '1A2B3C4D');
+                          if (s == null || !context.mounted) return;
+                          await act('settings', {'metaquotesIds': s});
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              if (v.configured && a != null)
+                SliverToBoxAdapter(
+                  child: CupertinoListSection.insetGrouped(backgroundColor: const Color(0x00000000), decoration: glassDecoration(context, radius: 14), separatorColor: resolve(context, CupertinoColors.separator).withValues(alpha: 0.4), 
+                    header: const ListHeader('EA'),
+                    footer: const ListFooter('The chart is only where the EA sits -- it analyses every symbol Dave asks for. Changes restart MT5 on the same account.'),
+                    children: [
+                      CupertinoListTile(
+                        title: const Text('Chart symbol'),
+                        additionalInfo: Text(a.symbol),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () async {
+                          final s = await promptText(context, title: 'Chart symbol', message: 'Exactly as your broker names it.', initial: a.symbol, placeholder: 'VOL_80');
+                          if (s != null && s.isNotEmpty && s != a.symbol && context.mounted) await act('settings', {'symbol': s});
+                        },
+                      ),
+                      CupertinoListTile(
+                        title: const Text('Timeframe'),
+                        additionalInfo: Text(a.period),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () async {
+                          final p = await _pickPeriod(context, a.period);
+                          if (p != null && p != a.period && context.mounted) await act('settings', {'period': p});
+                        },
+                      ),
+                      CupertinoListTile(
+                        title: const Text('Report every'),
+                        additionalInfo: Text('${v.pushSeconds}s'),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () async {
+                          final s = await promptText(context, title: 'Report interval', message: 'Seconds between EA reports, 2 to 120.', initial: '${v.pushSeconds}', keyboardType: TextInputType.number);
+                          final n = int.tryParse(s ?? '');
+                          if (n == null || !context.mounted) return;
+                          if (n < 2 || n > 120) return showError(context, 'Use a whole number from 2 to 120.');
+                          if (n != v.pushSeconds) await act('settings', {'inputs': {'PushSeconds': n}});
+                        },
+                      ),
+                      if (v.eaVersions.length > 1)
+                        CupertinoListTile(
+                          title: const Text('EA version'),
+                          additionalInfo: Text(v.eaVersion == 'latest' ? 'Latest' : v.eaVersion),
+                          trailing: const CupertinoListTileChevron(),
+                          onTap: () async {
+                            final picked = await showCupertinoModalPopup<String>(
+                              context: context,
+                              builder: (ctx) => CupertinoActionSheet(
+                                title: const Text('EA version'),
+                                message: const Text('MT5 builds the version you pick and restarts on it, about a minute. Dave\'s scans are made for the latest; older versions name some analysis differently.'),
+                                actions: [
+                                  for (final e in v.eaVersions)
+                                    CupertinoActionSheetAction(
+                                      isDefaultAction: e == v.eaVersion,
+                                      onPressed: () => Navigator.pop(ctx, e),
+                                      child: Text(e == 'latest' ? 'Latest' : 'Version $e'),
+                                    ),
+                                ],
+                                cancelButton: CupertinoActionSheetAction(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                              ),
+                            );
+                            if (picked != null && picked != v.eaVersion && context.mounted) await act('ea-version', {'version': picked});
+                          },
+                        ),
+                      CupertinoListTile(
+                        leading: Icon(CupertinoIcons.arrow_clockwise, color: Look.of(context).accent),
+                        title: Text('Restart MT5', style: TextStyle(color: Look.of(context).accent)),
+                        onTap: () => act('restart'),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ];
+        },
+      );
+
+  Future<void> _connect(BuildContext context, Future<void> Function(String, [Map<String, Object?>]) act) async {
+    final login = await promptText(context, title: 'Account number', message: 'Your MT5 login.', keyboardType: TextInputType.number, action: 'Next');
+    if (login == null || login.isEmpty || !context.mounted) return;
+    final password = await promptText(context, title: 'Password', message: 'Sent to your MT5 container only. Not stored on this phone.', obscure: true, action: 'Next');
+    if (password == null || password.isEmpty || !context.mounted) return;
+    final server = await promptText(context, title: 'Server', message: 'Exactly as MT5 shows it at login.', placeholder: 'Deriv-Demo', action: 'Next');
+    if (server == null || server.isEmpty || !context.mounted) return;
+    final mq = await promptText(context,
+        title: 'MetaQuotes ID (optional)', message: 'So MT5 also pushes alerts to the MT5 app on your phone. It\'s under Settings > Messages in that app. Leave empty to skip.', placeholder: '1A2B3C4D', action: 'Connect');
+    if (mq == null || !context.mounted) return;
+    await act('connect', {'login': login, 'password': password, 'server': server, if (mq.trim().isNotEmpty) 'metaquotesIds': mq});
+  }
+
+  static String _pushLine(Mt5View v) => switch (v.phonePush) {
+        'on' => 'Working -- MT5 confirms push is on',
+        'applying' => 'Entering it in MT5…',
+        'failed' => 'Not working: ${v.phonePushDetail ?? 'MT5 did not accept it'}',
+        _ => v.phonePushDetail ?? 'Set',
+      };
+
+  Future<String?> _pickPeriod(BuildContext context, String current) => showCupertinoModalPopup<String>(
+        context: context,
+        builder: (ctx) => CupertinoActionSheet(
+          title: const Text('Timeframe'),
+          actions: [
+            for (final p in const ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'])
+              CupertinoActionSheetAction(isDefaultAction: p == current, onPressed: () => Navigator.pop(ctx, p), child: Text(p)),
+          ],
+          cancelButton: CupertinoActionSheetAction(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        ),
+      );
+}

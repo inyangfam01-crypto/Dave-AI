@@ -1,0 +1,16 @@
+{
+  "name": "@dave/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "dependencies": {
+    "@dave/memory": "workspace:*",
+    "@dave/sandbox": "workspace:*",
+    "@dave/ea-bridge": "workspace:*"
+  },
+  "exports": {
+    ".": "./lib/index.js"
+  }
+}

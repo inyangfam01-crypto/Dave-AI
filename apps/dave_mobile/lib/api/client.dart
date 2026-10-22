@@ -1,0 +1,339 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:http/http.dart' as http;
+
+import 'models.dart';
+
+/// Thrown when the server no longer recognises this phone -- it was disconnected from the web
+/// panel, or its token is gone. The app's only correct response is to go back to the connect
+/// screen and say so; retrying cannot fix it.
+class UnpairedException implements Exception {
+  const UnpairedException([this.message = 'This phone was disconnected. Pair it again from the web panel.']);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// Anything else that went wrong talking to the server, phrased for a person.
+class ApiException implements Exception {
+  const ApiException(this.message, {this.statusCode});
+  final String message;
+  final int? statusCode;
+  @override
+  String toString() => message;
+}
+
+/// Turns whatever someone types into the address box into a usable base URL.
+///
+/// People will type "dave-bot-production.up.railway.app", "https://...app/", or paste a URL with
+/// a path on the end. All of those mean the same server. Returns null for anything that is not a
+/// server address.
+///
+/// Refuses plain http:// to anything that is not on the local network: every later request
+/// carries the device token, and sending it unencrypted across the internet would hand it to
+/// anyone on the path. http is allowed only for a LAN or the emulator, which is how you test
+/// against a server on your own computer.
+Uri? normaliseEndpoint(String input) {
+  var text = input.trim();
+  if (text.isEmpty) return null;
+  if (!text.contains('://')) text = 'https://$text';
+  final Uri uri;
+  try {
+    uri = Uri.parse(text);
+  } catch (_) {
+    return null;
+  }
+  if (uri.host.isEmpty || !(uri.scheme == 'https' || uri.scheme == 'http')) return null;
+  if (uri.scheme == 'http' && !_isLocal(uri.host)) return null;
+  return Uri(scheme: uri.scheme, host: uri.host, port: uri.hasPort ? uri.port : null);
+}
+
+bool _isLocal(String host) {
+  if (host == 'localhost' || host == '10.0.2.2') return true; // 10.0.2.2 = the emulator's host
+  final ip = InternetAddress.tryParse(host);
+  if (ip == null) return false;
+  if (ip.isLoopback) return true;
+  final b = ip.rawAddress;
+  return ip.type == InternetAddressType.IPv4 && (b[0] == 10 || (b[0] == 192 && b[1] == 168) || (b[0] == 172 && b[1] >= 16 && b[1] <= 31));
+}
+
+class PairResult {
+  PairResult(this.token, this.deviceId);
+  final String token;
+  final String deviceId;
+}
+
+/// The phone's side of the /api/app/* API.
+const _keep = Object();
+
+class DaveApi {
+  DaveApi({required this.base, required this.token, http.Client? client, this.streamClient}) : _http = client ?? http.Client();
+
+  final Uri base;
+  final String token;
+  final http.Client _http;
+
+  /// The client for ordinary requests -- shared with the chat's calls.
+  http.Client get httpClient => _http;
+
+  /// Makes the client a long-lived stream (the chat's live feed) holds and closes on its own.
+  /// Overridable for tests; a fresh real client otherwise.
+  final http.Client Function()? streamClient;
+
+  static const _timeout = Duration(seconds: 20);
+
+  /// Exchanges a one-time pairing code for this phone's token. The only call that needs no token.
+  static Future<PairResult> pair(Uri base, String code, String label, {http.Client? client}) async {
+    final c = client ?? http.Client();
+    final http.Response res;
+    try {
+      res = await c
+          .post(base.replace(path: '/api/app/pair'), headers: {'content-type': 'application/json'}, body: jsonEncode({'code': code.trim().toUpperCase(), 'label': label}))
+          .timeout(_timeout);
+    } on TimeoutException {
+      throw const ApiException('The server took too long to answer. Check the address and try again.');
+    } on SocketException {
+      throw const ApiException('Could not reach that server. Check the address and your connection.');
+    } on HandshakeException {
+      throw const ApiException('Could not make a secure connection to that server.');
+    }
+    final body = _decode(res);
+    if (res.statusCode != 200) {
+      throw ApiException(body['error'] is String ? body['error'] as String : 'Pairing failed (${res.statusCode}).', statusCode: res.statusCode);
+    }
+    final token = body['token'];
+    if (token is! String || token.isEmpty) throw const ApiException('The server did not return a token.');
+    final device = body['device'];
+    return PairResult(token, device is Map && device['id'] is String ? device['id'] as String : '');
+  }
+
+  Map<String, String> get _headers => {'authorization': 'Bearer $token', 'accept': 'application/json'};
+
+  Uri _url(String path, [Map<String, String>? query]) => base.replace(path: path, queryParameters: query);
+
+  Future<Map<String, dynamic>> _send(Future<http.Response> Function() call, {Duration timeout = _timeout}) async {
+    final http.Response res;
+    try {
+      res = await call().timeout(timeout);
+    } on TimeoutException {
+      throw const ApiException('The server took too long to answer.');
+    } on SocketException {
+      throw const ApiException('No connection to the server.');
+    } on HandshakeException {
+      throw const ApiException('Could not make a secure connection to the server.');
+    } on http.ClientException {
+      throw const ApiException('The connection to the server was interrupted.');
+    }
+    if (res.statusCode == 401) throw const UnpairedException();
+    final body = _decode(res);
+    if (res.statusCode >= 400) {
+      throw ApiException(body['error'] is String ? body['error'] as String : 'The server returned an error (${res.statusCode}).', statusCode: res.statusCode);
+    }
+    return body;
+  }
+
+  static Map<String, dynamic> _decode(http.Response res) {
+    try {
+      final v = jsonDecode(utf8.decode(res.bodyBytes));
+      return v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  Map<String, dynamic>? _lastDashboard;
+  DateTime _lastDashboardAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Future<Dashboard> dashboard() async {
+    final j = await _send(() => _http.get(_url('/api/app/dashboard'), headers: _headers));
+    _lastDashboard = j;
+    _lastDashboardAt = DateTime.now();
+    return Dashboard.fromJson(j);
+  }
+
+  /// For Home's fast refresh: only the money, open trades and pending orders, laid over the last
+  /// full dashboard. The full one (history, charts) is fetched again every 30s, and straight away
+  /// when the number of open trades changes -- a trade just opened or closed.
+  Future<Dashboard> dashboardLive() async {
+    final last = _lastDashboard;
+    if (last == null || DateTime.now().difference(_lastDashboardAt) > const Duration(seconds: 30)) return dashboard();
+    final light = await _send(() => _http.get(_url('/api/app/dashboard', {'light': '1'}), headers: _headers));
+    int? count(Map<String, dynamic> j) => (j['open'] is Map ? (j['open'] as Map)['count'] : null) as int?;
+    if (count(light) != count(last)) return dashboard();
+    return Dashboard.fromJson({...last, ...light});
+  }
+
+  Future<Brain> brain() async => Brain.fromJson(await _send(() => _http.get(_url('/api/app/brain'), headers: _headers)));
+
+  Future<List<Skill>> skills() async {
+    final body = await _send(() => _http.get(_url('/api/app/skills'), headers: _headers));
+    final list = body['skills'];
+    return list is List ? list.whereType<Map>().map((m) => Skill.fromJson(Map<String, dynamic>.from(m))).toList() : <Skill>[];
+  }
+
+  Future<Skill> skill(String id) async => Skill.fromJson(await _send(() => _http.get(_url('/api/app/skills', {'id': id}), headers: _headers)));
+
+  Future<void> _skillAction(Map<String, Object?> body) =>
+      _send(() => _http.post(_url('/api/app/skills'), headers: {..._headers, 'content-type': 'application/json'}, body: jsonEncode(body)));
+
+  Future<void> activateSkill(String id) => _skillAction({'action': 'activate', 'skillId': id});
+  Future<void> deactivateSkill() => _skillAction({'action': 'deactivate'});
+  Future<void> installSkillFromGithub(String repoUrl) => _skillAction({'action': 'install-github', 'repoUrl': repoUrl});
+  Future<void> deleteSkill(String id) => _send(() => _http.delete(_url('/api/app/skills', {'id': id}), headers: _headers));
+
+  Future<BotState> bot() async => BotState.fromJson(await _send(() => _http.get(_url('/api/app/bot'), headers: _headers)));
+
+  Future<BotState> updateBot({bool? running, bool? executionEnabled, int? intervalMinutes, bool? restartScan}) async {
+    await _send(() => _http.post(_url('/api/app/bot'),
+        headers: {..._headers, 'content-type': 'application/json'},
+        body: jsonEncode({
+          'running': ?running,
+          'executionEnabled': ?executionEnabled,
+          'intervalMinutes': ?intervalMinutes,
+          'restartScan': ?restartScan,
+        })));
+    return bot();
+  }
+
+  /// Every trade event (and fired reminder) after [afterId] -- the catch-up for when the
+  /// background service was dead.
+  Future<({List<TradeEvent> events, int latestId})> eventsAfter(int afterId) async {
+    final body = await _send(() => _http.get(_url('/api/app/events', {'format': 'json', 'after': '$afterId', 'include': 'reminders,calls'}), headers: _headers));
+    final list = body['events'];
+    final events = list is List ? list.whereType<Map>().map((m) => TradeEvent.fromJson(Map<String, dynamic>.from(m))).toList() : <TradeEvent>[];
+    final latest = body['latestId'];
+    return (events: events, latestId: latest is num ? latest.toInt() : afterId);
+  }
+
+  Future<Map<String, dynamic>> _post(String path, Map<String, Object?> body) =>
+      _send(() => _http.post(_url(path), headers: {..._headers, 'content-type': 'application/json'}, body: jsonEncode(body)));
+
+  // --- settings ---------------------------------------------------------------------------
+
+  Future<AppSettings> settings() async => AppSettings.fromJson(await _send(() => _http.get(_url('/api/app/settings'), headers: _headers)));
+
+  /// Changes one setting; returns what the server actually stored.
+  Future<AppSettings> updateSetting(String id, Object? value) async => AppSettings.fromJson(await _post('/api/app/settings', {'id': id, 'value': value}));
+
+  // --- AI providers ---------------------------------------------------------------------------
+
+  Future<ProviderList> providers() async => ProviderList.fromJson(await _send(() => _http.get(_url('/api/app/providers'), headers: _headers)));
+
+  Future<ProviderList> moveBackup(String provider, String direction) async =>
+      ProviderList.fromJson(await _post('/api/app/providers', {'action': 'move-backup', 'provider': provider, 'direction': direction}));
+
+  Future<ProviderState> provider(String id) async =>
+      ProviderState.fromJson(await _send(() => _http.get(_url('/api/app/provider', {'provider': id}), headers: _headers)));
+
+  Future<ProviderState> providerAction(String id, String action, [Map<String, Object?> fields = const {}]) async =>
+      ProviderState.fromJson(await _post('/api/app/provider', {'provider': id, 'action': action, ...fields}));
+
+  /// The provider's own model list (empty when it has none to offer).
+  Future<List<String>> providerModels(String id) async {
+    final body = await _post('/api/app/provider', {'provider': id, 'action': 'models'});
+    final list = body['models'];
+    return list is List ? list.whereType<String>().toList() : const [];
+  }
+
+  // --- MetaTrader 5 in Dave's container --------------------------------------------------------
+
+  Future<Mt5View> mt5() async => Mt5View.fromJson(await _send(() => _http.get(_url('/api/app/mt5'), headers: _headers), timeout: const Duration(seconds: 40)));
+
+  /// connect / settings / restart compile the EA and restart MT5 under Wine -- minutes, not seconds.
+  Future<Mt5View> mt5Action(String action, [Map<String, Object?> fields = const {}]) async => Mt5View.fromJson(await _send(
+        () => _http.post(_url('/api/app/mt5'), headers: {..._headers, 'content-type': 'application/json'}, body: jsonEncode({'action': action, ...fields})),
+        timeout: const Duration(minutes: 7),
+      ));
+
+  // --- what Dave is waiting on, and his prompt ----------------------------------------------
+
+  Future<Map<String, dynamic>> watchlist() => _send(() => _http.get(_url('/api/app/watchlist'), headers: _headers));
+  Future<Map<String, dynamic>> watchlistAction(String action, String id) => _post('/api/app/watchlist', {'action': action, 'id': id});
+
+  Future<Map<String, dynamic>> promptParts() => _send(() => _http.get(_url('/api/app/prompt'), headers: _headers));
+  Future<Map<String, dynamic>> savePrompt(String file, String text) => _post('/api/app/prompt', {'file': file, 'text': text});
+  Future<Map<String, dynamic>> resetPrompt(String file) => _post('/api/app/prompt', {'file': file, 'reset': true});
+
+  // --- service keys, pair groups, analysis scope -----------------------------------------------
+
+  Future<Map<String, dynamic>> serviceKeys() => _send(() => _http.get(_url('/api/app/keys'), headers: _headers));
+  Future<Map<String, dynamic>> serviceKeysAction(Map<String, Object?> body) => _post('/api/app/keys', body);
+  Future<Map<String, dynamic>> pairGroups() => _send(() => _http.get(_url('/api/app/pair-groups'), headers: _headers));
+  Future<Map<String, dynamic>> pairGroupsAction(Map<String, Object?> body) => _post('/api/app/pair-groups', body);
+  Future<Map<String, dynamic>> history({DateTime? from, DateTime? to}) => _send(() => _http.get(
+      _url('/api/app/history', {
+        if (from != null) 'from': '${from.millisecondsSinceEpoch}',
+        if (to != null) 'to': '${to.millisecondsSinceEpoch}',
+      }),
+      headers: _headers));
+  Future<Map<String, dynamic>> voice() => _send(() => _http.get(_url('/api/app/voice'), headers: _headers));
+  Future<Map<String, dynamic>> voiceAction(Map<String, Object?> body) => _post('/api/app/voice', body);
+  Future<Map<String, dynamic>> growth() => _send(() => _http.get(_url('/api/app/growth'), headers: _headers));
+  Future<Map<String, dynamic>> growthAction(Map<String, Object?> body) => _post('/api/app/growth', body);
+  Future<Map<String, dynamic>> mcp() => _send(() => _http.get(_url('/api/app/mcp'), headers: _headers));
+  Future<Map<String, dynamic>> mcpAction(Map<String, Object?> body) => _post('/api/app/mcp', body);
+  /// The steps of Dave's thinking pass: switch on/off, delete, add your own, reset.
+  Future<Map<String, dynamic>> thinkingStages() => _send(() => _http.get(_url('/api/app/thinking-stages'), headers: _headers));
+  Future<Map<String, dynamic>> thinkingStagesAction(Map<String, Object?> body) => _post('/api/app/thinking-stages', body);
+
+  Future<Map<String, dynamic>> analysisScope() => _send(() => _http.get(_url('/api/app/analysis-scope'), headers: _headers));
+  Future<Map<String, dynamic>> analysisScopeAction(Map<String, Object?> body) => _post('/api/app/analysis-scope', body);
+
+  // --- context window -------------------------------------------------------------------------
+
+  Future<ContextUsage> context({int days = 8}) async =>
+      ContextUsage.fromJson(await _send(() => _http.get(_url('/api/app/context', {'days': '$days'}), headers: _headers)));
+
+  // --- brain --------------------------------------------------------------------------------
+
+  Future<Brain> brainAction(String action, [Map<String, Object?> fields = const {}]) async => Brain.fromJson(await _post('/api/app/brain', {'action': action, ...fields}));
+
+  Future<KnowledgeDetail> knowledge(String id) async =>
+      KnowledgeDetail.fromJson(await _send(() => _http.get(_url('/api/app/brain', {'knowledgeId': id}), headers: _headers)));
+
+  // --- skills and trades --------------------------------------------------------------------
+
+  Future<void> createSkill({required String name, required String description, required String content}) =>
+      _skillAction({'action': 'create', 'name': name, 'description': description, 'content': content});
+
+  Future<void> updateSkill(String id, String content) => _skillAction({'action': 'update', 'skillId': id, 'content': content});
+
+  /// Queues a close with the EA. It is confirmed by the EA's next report, not by this call.
+  /// Returns whether MT5 is online right now to carry it out.
+  Future<bool> closeTrade(String ticket) async => (await _post('/api/app/trades', {'action': 'close', 'ticket': ticket}))['eaConnected'] != false;
+
+  /// Queues the cancel of a pending order (buy/sell limit or stop). Returns whether MT5 is online.
+  Future<bool> cancelOrder(String ticket) async => (await _post('/api/app/trades', {'action': 'cancel', 'ticket': ticket}))['eaConnected'] != false;
+
+  /// Sets SL and/or TP on an open trade or a pending order. A price sets it, null removes it,
+  /// leaving a side out keeps it. Queued with the EA like a close.
+  Future<void> setStops(String ticket, {Object? sl = _keep, Object? tp = _keep}) => _post('/api/app/trades', {
+        'action': 'modify',
+        'ticket': ticket,
+        if (!identical(sl, _keep)) 'sl': sl,
+        if (!identical(tp, _keep)) 'tp': tp,
+      });
+
+  // --- Nous copy trading (served by the bot process, where the Telegram login runs) -------------
+
+  Future<NousState> nous() async => NousState.fromJson(await _send(() => _http.get(_url('/api/app/nous/state'), headers: _headers)));
+
+  /// One Nous step: login/begin, login/code, login/password, login/cancel, settings, logout, close.
+  Future<Map<String, dynamic>> nousAction(String path, [Map<String, Object?> body = const {}]) => _send(
+        () => _http.post(_url('/api/app/nous/$path'), headers: {..._headers, 'content-type': 'application/json'}, body: jsonEncode(body)),
+        timeout: const Duration(seconds: 60),
+      );
+
+  /// The account's channels and groups -- Telegram can take a while to list them.
+  Future<List<NousChat>> nousChats() async {
+    final body = await _send(() => _http.get(_url('/api/app/nous/chats'), headers: _headers), timeout: const Duration(seconds: 60));
+    final list = body['chats'];
+    return list is List ? list.whereType<Map>().map((m) => NousChat.fromJson(Map<String, dynamic>.from(m))).toList() : <NousChat>[];
+  }
+
+  Future<NousState> saveNousChats(List<String> ids) async => NousState.fromJson(await nousAction('chats', {'ids': ids}));
+
+  void close() => _http.close();
+}

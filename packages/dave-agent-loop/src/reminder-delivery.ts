@@ -1,0 +1,62 @@
+import { wakeFromSelfPause } from "./self-pause.js";
+import { runScanSoon } from "./trading-loop.js";
+import { takeDueReminders, describeFiredReminder, type Reminder } from "@dave/workers";
+import { appendReminderEvent } from "@dave/ea-bridge";
+import { getActiveGroupInfo } from "@dave/trading";
+import { focusScanOnAlert } from "./alert-focus.js";
+
+/**
+ * Fires Dave's due reminders (dave-workers/reminders.ts). Called from the bot's 5-second control
+ * watcher, so a reminder lands within seconds of its time whether or not autonomous trading is on.
+ *
+ * Each fired reminder goes three ways:
+ *   - to the chat, so the trader sees it (with the reason it was set);
+ *   - to the phone's event log, so the app raises a notification through the connection it
+ *     already holds for trades;
+ *   - back to Dave: it stays in his context as "fired" (chat turns and autonomous cycles both show
+ *     it) until he deletes it, and when it names a symbol and autonomous trading is on, that symbol
+ *     is analysed on the very next cycle.
+ *
+ * takeDueReminders marks each reminder fired before it is sent, so a slow or failed send can never
+ * make the same reminder fire twice.
+ */
+export function deliverDueReminders(userId: string, send: (text: string) => Promise<void>, now = Date.now()): Reminder[] {
+  let due: Reminder[];
+  try {
+    due = takeDueReminders(userId, now);
+  } catch (err) {
+    console.error(`[reminders] ${userId}: could not read reminders:`, err);
+    return [];
+  }
+  for (const reminder of due) {
+    void send(describeFiredReminder(reminder)).catch((err) => console.error(`[reminders] ${userId}: could not send ${reminder.id}:`, err));
+    try {
+      appendReminderEvent(userId, reminder, now);
+    } catch (err) {
+      console.error(`[reminders] ${userId}: could not queue phone notification for ${reminder.id}:`, err);
+    }
+    // Like a level hit or a trade alert: its pair is scanned within seconds, with the reminder on
+    // top of the prompt -- even a pair with an open trade (the trader: "even reminder messages too").
+    // A reminder that didn't name its pair: the pair it mentions (from the active and backup groups).
+    const symbol = reminder.symbol ?? pairMentioned(userId, `${reminder.text} ${reminder.reason ?? ""}`);
+    if (!symbol && wakeFromSelfPause(userId)) {
+      // A reminder about no pair in particular still ends the rest: the next scan runs now.
+      runScanSoon(userId);
+    }
+    if (symbol) {
+      focusScanOnAlert(userId, symbol, `REMINDER you set (${reminder.id}) fired: ${reminder.text}${reminder.reason ? ` -- why: ${reminder.reason}` : ""}`, now);
+    }
+    console.log(`[reminders] ${userId}: fired ${reminder.id} -- ${reminder.text}`);
+  }
+  return due;
+}
+
+function pairMentioned(userId: string, text: string): string | undefined {
+  try {
+    const info = getActiveGroupInfo(userId);
+    const pairs = [...info.effectiveSymbols, ...(info.fallbackGroup?.symbols ?? [])].sort((a, b) => b.length - a.length);
+    return pairs.find((p) => new RegExp(`\\b${p.replace(/[^A-Za-z0-9_]/g, "")}\\b`, "i").test(text));
+  } catch {
+    return undefined;
+  }
+}

@@ -1,0 +1,1200 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid } from "recharts";
+
+type Tab = "stats" | "phone" | "groups" | "teams" | "models" | "selfimprove" | "db" | "mcp" | "credentials" | "settings";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "stats", label: "Live Stats" },
+  { id: "phone", label: "Phone App" },
+  { id: "groups", label: "Pair Groups" },
+  { id: "teams", label: "Agent Teams" },
+  { id: "models", label: "AI Models" },
+  { id: "selfimprove", label: "Self-Improvement" },
+  { id: "db", label: "Database" },
+  { id: "mcp", label: "MCP" },
+  { id: "credentials", label: "Credentials" },
+  { id: "settings", label: "Settings" },
+];
+
+function useApi(userId: string) {
+  return useCallback(
+    async (path: string, opts?: RequestInit) => {
+      const sep = path.includes("?") ? "&" : "?";
+      const res = await fetch(`${path}${sep}userId=${encodeURIComponent(userId)}`, opts);
+      return res.json();
+    },
+    [userId]
+  );
+}
+
+export default function AdminPage() {
+  const [userId, setUserId] = useState("default");
+  const [tab, setTab] = useState<Tab>("stats");
+  // Start on the user the bot actually runs as (OWNER_USER_ID), not the literal "default" --
+  // see app/api/owner/route.ts for what went wrong otherwise.
+  useEffect(() => {
+    fetch("/api/owner")
+      .then((r) => r.json())
+      .then((r) => typeof r.ownerUserId === "string" && r.ownerUserId && setUserId(r.ownerUserId))
+      .catch(() => undefined);
+  }, []);
+  const api = useApi(userId);
+  // The dot used to be hardcoded green: a permanent "all good" on a trading dashboard, shown
+  // even with no terminal connected at all. A status light that cannot report bad news is worse
+  // than no status light, so it reports the real EA connection and says which in words too.
+  const [eaConnected, setEaConnected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api("/api/status/ea")
+        .then((r) => !cancelled && setEaConnected(r.connected === true))
+        .catch(() => !cancelled && setEaConnected(false));
+    load();
+    const id = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [api]);
+
+  return (
+    <>
+      <header>
+        <div className="brand">
+          <span className={eaConnected === false ? "dot bad" : "dot"} />
+          <div>
+            <h1>Dave — Admin Panel</h1>
+            <div className="sub">
+              {eaConnected === null ? "Checking terminal…" : eaConnected ? "Terminal connected" : "Terminal not connected"}
+            </div>
+          </div>
+        </div>
+        <div className="row">
+          <input type="text" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="userId" style={{ width: 120 }} />
+        </div>
+      </header>
+
+      <nav>
+        {TABS.map((t) => (
+          <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      <main>
+        {tab === "stats" && <StatsPanel userId={userId} />}
+        {tab === "phone" && <PhonePanel userId={userId} />}
+        {tab === "groups" && <GroupsPanel userId={userId} />}
+        {tab === "teams" && <TeamsPanel userId={userId} />}
+        {tab === "models" && <ModelsPanel userId={userId} />}
+        {tab === "selfimprove" && <SelfImprovementPanel userId={userId} />}
+        {tab === "db" && <DatabasePanel userId={userId} />}
+        {tab === "mcp" && <McpPanel userId={userId} />}
+        {tab === "credentials" && <CredentialsPanel userId={userId} />}
+        {tab === "settings" && <SettingsPanel userId={userId} />}
+      </main>
+    </>
+  );
+}
+
+// --- Live Stats (14.1) ---
+function StatsPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [stats, setStats] = useState<any>(null);
+
+  useEffect(() => {
+    api("/api/stats").then(setStats);
+  }, [api]);
+
+  if (!stats) return <div className="card placeholder">Loading...</div>;
+
+  const tiles: [string, string | number][] = [
+    ["Uptime", `${stats.uptimeSeconds}s`],
+    ["Pair groups", stats.pairGroupCount],
+    ["Active workers", stats.activeWorkerCount],
+    ["Comms messages", stats.commsMessageCount],
+    ["Max open trades", stats.maxOpenTrades ?? "not set"],
+    ["Max daily loss %", stats.maxDailyLossPct ?? "not set"],
+  ];
+
+  return (
+    <>
+      <BalanceCard userId={userId} api={api} />
+      <div className="card">
+        <h2>Live Stats</h2>
+        <div className="stat-grid">
+          {tiles.map(([label, value]) => (
+            <div className="stat-tile" key={label}>
+              <div className="value">{value}</div>
+              <div className="label">{label}</div>
+            </div>
+          ))}
+        </div>
+        <div className="stat-note">{stats.note}</div>
+      </div>
+      <ActivityHeatmap userId={userId} api={api} />
+      <div className="row" style={{ alignItems: "stretch", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 320px" }}>
+          <PairGroupPie userId={userId} api={api} />
+        </div>
+        <div style={{ flex: "2 1 480px" }}>
+          <OutcomeRangeChart userId={userId} api={api} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// --- J6: real-time balance card, large, top of dashboard ---
+function BalanceCard({ api }: { userId: string; api: ReturnType<typeof useApi> }) {
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api("/api/analytics").then((r) => !cancelled && setData(r.balance));
+    load();
+    const id = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [api]);
+
+  if (!data) return <div className="card placeholder">Loading balance...</div>;
+
+  return (
+    <div className="card balance-card">
+      {data.value !== null ? (
+        <>
+          <div className="balance-value">
+            ${data.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="balance-sub">
+            Equity ${data.equity?.toLocaleString(undefined, { minimumFractionDigits: 2 })} &middot; updated {new Date(data.updatedAt).toLocaleTimeString()}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="balance-value dim">--</div>
+          <div className="balance-sub">{data.note}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// --- J7: GitHub-contribution-style activity heatmap, real daily P&L, last ~6 months ---
+function ActivityHeatmap({ api }: { userId: string; api: ReturnType<typeof useApi> }) {
+  const [days, setDays] = useState<{ day: string; pnl: number }[] | null>(null);
+
+  useEffect(() => {
+    api("/api/analytics").then((r) => setDays(r.heatmap));
+  }, [api]);
+
+  if (!days) return <div className="card placeholder">Loading activity...</div>;
+
+  const byDay = new Map(days.map((d) => [d.day, d.pnl]));
+  const today = new Date();
+  const WEEKS = 26;
+  const cells: { date: Date; pnl: number | undefined }[] = [];
+  const start = new Date(today);
+  start.setDate(start.getDate() - WEEKS * 7);
+  start.setDate(start.getDate() - start.getDay()); // align to a Sunday
+  for (let i = 0; i < WEEKS * 7; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    const key = d.toISOString().slice(0, 10);
+    cells.push({ date: d, pnl: byDay.get(key) });
+  }
+  const maxAbs = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+  const colorFor = (pnl: number | undefined) => {
+    // A day with no closed trades falls through to the stylesheet's own neutral, which is defined
+    // against the current theme. The previous hardcoded rgba(255,255,255,0.05) was white-on-white
+    // the moment the panel stopped being dark -- every empty cell vanished and took the grid's
+    // shape with it.
+    if (pnl === undefined) return undefined;
+    // Diverging, because P&L has a real zero: red below it, green above, intensity by magnitude.
+    // The hues come from the theme's semantic status tokens so they adapt with light/dark rather
+    // than being frozen at one theme's values.
+    const intensity = Math.min(1, Math.abs(pnl) / maxAbs);
+    const hue = pnl >= 0 ? "var(--green)" : "var(--red)";
+    return `color-mix(in srgb, ${hue} ${Math.round((0.25 + intensity * 0.75) * 100)}%, transparent)`;
+  };
+  const weeks: typeof cells[] = [];
+  for (let w = 0; w < WEEKS; w++) weeks.push(cells.slice(w * 7, w * 7 + 7));
+
+  return (
+    <div className="card">
+      <h2>Activity Heatmap</h2>
+      <div className="heatmap-scroll">
+        <div className="heatmap-grid">
+          {weeks.map((week, wi) => (
+            <div className="heatmap-col" key={wi}>
+              {week.map((cell, di) => (
+                <div
+                  key={di}
+                  className="heatmap-cell"
+                  title={`${cell.date.toISOString().slice(0, 10)}: ${cell.pnl !== undefined ? `$${cell.pnl.toFixed(2)}` : "no closed trades"}`}
+                  style={{ background: colorFor(cell.pnl) }}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="stat-note">{days.length === 0 ? "No closed trades yet -- squares fill in as real trades close." : `${days.length} real day(s) with closed trades, last ${WEEKS} weeks.`}</div>
+    </div>
+  );
+}
+
+// --- J8: real trade distribution by pair group ---
+/**
+ * One hue, stepped by lightness, rather than seven unrelated colours.
+ *
+ * The previous palette was blue/purple/green/red/yellow/cyan/pink -- the "rainbow tiles" the
+ * design skill names as a slop trap, and worse here because two of those colours (green, red)
+ * mean profit and loss everywhere else in this panel. A pair group is not good or bad; colouring
+ * "Metals" red said something the chart did not mean.
+ *
+ * Ordered dark to light so the largest slice reads first, and distinguishable in greyscale.
+ */
+const PIE_COLORS = ["#0050a8", "#0064cf", "#007aff", "#3d9bff", "#6fb4ff", "#9ccdff", "#c7e2ff"];
+function PairGroupPie({ api }: { userId: string; api: ReturnType<typeof useApi> }) {
+  const [groups, setGroups] = useState<{ label: string; count: number }[] | null>(null);
+
+  useEffect(() => {
+    api("/api/analytics").then((r) => setGroups(r.pairGroups));
+  }, [api]);
+
+  if (!groups) return <div className="card placeholder">Loading distribution...</div>;
+
+  return (
+    <div className="card" style={{ height: 320 }}>
+      <h2>Trades by Pair Group</h2>
+      {groups.length === 0 ? (
+        <div className="placeholder">No journaled trades yet.</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={240}>
+          <PieChart>
+            <Pie data={groups} dataKey="count" nameKey="label" cx="50%" cy="50%" outerRadius={80} label={(d: any) => d.label}>
+              {groups.map((_, i) => (
+                <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+              ))}
+            </Pie>
+            <Tooltip contentStyle={{ background: "var(--bg-elevated)", border: "0.5px solid var(--separator-opaque)", borderRadius: 10, color: "var(--label)", boxShadow: "var(--shadow-card)" }} />
+            <Legend />
+          </PieChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+// --- J9: range/band chart -- spread of real trade outcomes per day, distinct from the heatmap's summed daily total ---
+function OutcomeRangeChart({ api }: { userId: string; api: ReturnType<typeof useApi> }) {
+  const [range, setRange] = useState<{ day: string; min: number; max: number; avg: number }[] | null>(null);
+
+  useEffect(() => {
+    api("/api/analytics").then((r) => setRange(r.range));
+  }, [api]);
+
+  if (!range) return <div className="card placeholder">Loading outcome range...</div>;
+
+  const data = range.map((r) => ({ ...r, band: [r.min, r.max] }));
+
+  return (
+    <div className="card" style={{ height: 320 }}>
+      <h2>Trade Outcome Range</h2>
+      {range.length === 0 ? (
+        <div className="placeholder">No closed trades yet -- the spread of daily outcomes will show up here.</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={240}>
+          <ComposedChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--separator)" />
+            <XAxis dataKey="day" stroke="var(--label-secondary)" fontSize={11} />
+            <YAxis stroke="var(--label-secondary)" fontSize={11} />
+            <Tooltip contentStyle={{ background: "var(--bg-elevated)", border: "0.5px solid var(--separator-opaque)", borderRadius: 10, color: "var(--label)", boxShadow: "var(--shadow-card)" }} />
+            <Area dataKey="band" stroke="none" fill="color-mix(in srgb, var(--accent) 18%, transparent)" />
+            <Line dataKey="avg" stroke="var(--accent)" strokeWidth={2} dot={{ r: 2.5 }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+      <div className="stat-note">Shaded band = min-to-max outcome that day; line = average. Distinct from the heatmap's summed daily total.</div>
+    </div>
+  );
+}
+
+// --- Pair Group Designer (14.1) -- real CRUD against dave-trading's own storage ---
+function GroupsPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [data, setData] = useState<any>(null);
+  const [form, setForm] = useState({ id: "", name: "", symbols: "" });
+
+  const reload = useCallback(() => {
+    api("/api/pair-groups").then(setData);
+  }, [api]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  if (!data) return <div className="card placeholder">Loading...</div>;
+
+  const addGroup = async () => {
+    const symbols = form.symbols
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!form.id || !form.name || symbols.length === 0) {
+      alert("id, name, and at least one symbol are required");
+      return;
+    }
+    await api("/api/pair-groups", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: form.id, name: form.name, symbols }) });
+    setForm({ id: "", name: "", symbols: "" });
+    reload();
+  };
+
+  const setActive = async (groupId: string) => {
+    await api("/api/pair-groups/active", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ groupId }) });
+    reload();
+  };
+  const setFallback = async (groupId: string) => {
+    await api("/api/pair-groups/fallback", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ groupId }) });
+    reload();
+  };
+  const remove = async (groupId: string) => {
+    await api(`/api/pair-groups/${groupId}`, { method: "DELETE" });
+    reload();
+  };
+
+  return (
+    <>
+      <div className="card">
+        <h2>Active and Fallback</h2>
+        <div className="row">
+          <span className={`badge ${data.activeGroup ? "ok" : "warn"}`}>Active: {data.activeGroup ? data.activeGroup.name : "none selected"}</span>
+          <span className={`badge ${data.fallbackGroup ? "ok" : "warn"}`}>Fallback: {data.fallbackGroup ? data.fallbackGroup.name : "none selected"}</span>
+          {data.pausedForExtremeConditions && <span className="badge bad">Paused (extreme conditions)</span>}
+        </div>
+      </div>
+      <div className="card">
+        <h2>Pair Group Designer</h2>
+        <div className="row" style={{ marginBottom: 14 }}>
+          <input type="text" placeholder="id (e.g. majors)" value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} style={{ width: 130 }} />
+          <input type="text" placeholder="Display name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ width: 150 }} />
+          <input type="text" placeholder="Symbols, comma separated" value={form.symbols} onChange={(e) => setForm({ ...form, symbols: e.target.value })} style={{ width: 260 }} />
+          <button className="btn" onClick={addGroup}>
+            Add group
+          </button>
+        </div>
+        {data.groups.length === 0 && <div className="placeholder">No pair groups yet — add one above.</div>}
+        {data.groups.map((g: any) => (
+          <div className="group-card" key={g.id}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div>
+                <strong>{g.name}</strong> <span style={{ color: "var(--text-dim)" }}>({g.id})</span>
+                <div className="symbols">
+                  {g.symbols.map((s: string) => (
+                    <span className="pill" key={s}>
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="row">
+                <button className="btn secondary" onClick={() => setActive(g.id)}>
+                  Set active
+                </button>
+                <button className="btn secondary" onClick={() => setFallback(g.id)}>
+                  Set fallback
+                </button>
+                <button className="btn danger" onClick={() => remove(g.id)}>
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// --- Agent Teams (14.1/13.3) ---
+function TeamsPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    api("/api/agent-teams").then(setData);
+  }, [api]);
+
+  if (!data) return <div className="card placeholder">Loading...</div>;
+
+  const nameById: Record<string, string> = { dave: "Dave" };
+  data.workers.forEach((w: any) => (nameById[w.id] = w.name));
+  const displayName = (id: string) => nameById[id] ?? id;
+
+  return (
+    <>
+      <div className="card">
+        <h2>Workers</h2>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Assignment</th>
+                <th>Task</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.workers.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="placeholder">
+                    No active workers
+                  </td>
+                </tr>
+              )}
+              {data.workers.map((w: any) => (
+                <tr key={w.id}>
+                  <td>{w.name}</td>
+                  <td>{w.role}</td>
+                  <td>{w.assignment}</td>
+                  <td>{w.task}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="card">
+        <h2>Agent Teams — live feed</h2>
+        {data.feed.length === 0 && <div className="placeholder">No messages yet</div>}
+        {[...data.feed].reverse().map((m: any, i: number) => (
+          <div className="feed-item" key={i}>
+            <div>
+              {displayName(m.from)} to {displayName(m.to)}: {m.content}
+            </div>
+            <div className="meta">{new Date(m.ts).toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// --- AI Model Picker (14.1/5.2) ---
+function ModelsPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [config, setConfig] = useState<any>(null);
+  const [primary, setPrimary] = useState("openai");
+
+  const reload = useCallback(() => {
+    api("/api/model-config").then((c) => {
+      setConfig(c);
+      setPrimary(c.primary);
+    });
+  }, [api]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const save = async () => {
+    const fallback = ["deepseek", "claude"].filter((p) => p !== primary);
+    await api("/api/model-config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ primary, fallback }) });
+    reload();
+  };
+
+  return (
+    <div className="card">
+      <h2>AI Model Picker</h2>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <span>Primary:</span>
+        <select value={primary} onChange={(e) => setPrimary(e.target.value)}>
+          <option value="openai">OpenAI</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="claude">Claude</option>
+        </select>
+        <button className="btn secondary" onClick={save}>
+          Save
+        </button>
+      </div>
+      {config && <div className="stat-note">fallback order: {config.fallback.join(" then ")}</div>}
+    </div>
+  );
+}
+
+// --- Self-Improvement (Step 17) ---
+function SelfImprovementPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    api("/api/self-improvement").then(setData);
+  }, [api]);
+
+  if (!data) return <div className="card">Loading...</div>;
+
+  return (
+    <div className="card">
+      <h2>Self-Improvement</h2>
+      <div className="stat-note">{data.note}</div>
+      <div className="stat-note">Pending patch proposals: {data.pendingPatches ?? 0}</div>
+      {data.lineage?.length ? (
+        data.lineage.map((v: any) => (
+          <div className="group-card" key={v.id}>
+            <strong>{v.targetFile}</strong>
+            <div className="stat-note">{v.changelogEntry}</div>
+            <div className="stat-note">evolved from: {v.evolvedFrom ?? "(lineage root)"}</div>
+          </div>
+        ))
+      ) : (
+        <div className="placeholder">No versions yet -- Dave hasn't applied a self-patch.</div>
+      )}
+    </div>
+  );
+}
+
+// --- Database + Automation (Step 16) ---
+function DatabasePanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    api("/api/database-automation").then(setData);
+  }, [api]);
+
+  if (!data) return <div className="card">Loading...</div>;
+
+  return (
+    <div className="card">
+      <h2>Database and Automation</h2>
+      <div className="stat-note">{data.note}</div>
+      {data.tables?.length ? (
+        data.tables.map((t: string) => (
+          <div className="group-card" key={t}>
+            <strong>{t}</strong>
+            <div className="stat-note">{data.tableCounts?.[t] ?? 0} row(s)</div>
+          </div>
+        ))
+      ) : (
+        <div className="placeholder">No tables yet -- Dave creates them as it needs them.</div>
+      )}
+      <div className="stat-note">Active/waiting workflow runs: {data.activeWorkflowRuns ?? 0}</div>
+    </div>
+  );
+}
+
+// --- MCP Connections (11.3) ---
+function McpPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    api("/api/mcp-connections").then(setData);
+  }, [api]);
+
+  return (
+    <div className="card">
+      <h2>MCP Connections</h2>
+      {data?.connections.map((c: any) => (
+        <div className="group-card" key={c.name}>
+          <strong>{c.name}</strong>
+          <div className="stat-note">
+            {c.kind} — {c.status}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --- Credentials: paste real Telegram/provider keys here ---
+function CredentialsPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+
+  return (
+    <>
+      <TelegramOtpCard userId={userId} api={api} />
+      <ProviderKeysCard userId={userId} api={api} title="AI Provider Keys" apiPath="/api/provider-keys" providerListPath="/api/providers" />
+      <SimpleKeysCard userId={userId} api={api} title="E2B Keys" apiPath="/api/e2b-keys" />
+      <SimpleKeysCard userId={userId} api={api} title="Firecrawl Keys" apiPath="/api/firecrawl-keys" />
+    </>
+  );
+}
+
+/** What the bot process reports about itself (see @dave/telegram bot-status.ts). */
+function describeBot(bot: any): { tone: "ok" | "warn" | "bad"; text: string } {
+  if (!bot) return { tone: "warn", text: "Bot not started yet" };
+  switch (bot.state) {
+    case "online":
+      return { tone: "ok", text: `Bot online${bot.username ? ` as @${bot.username}` : ""}${bot.mode === "polling" ? " (fetching messages; no public address)" : ""}` };
+    case "starting":
+      return { tone: "warn", text: "Bot starting..." };
+    case "waiting-for-token":
+      return { tone: "warn", text: "Waiting for pairing" };
+    default:
+      return { tone: "bad", text: bot.detail ?? "The bot could not start." };
+  }
+}
+
+function TelegramOtpCard({ api }: { userId: string; api: ReturnType<typeof useApi> }) {
+  const [status, setStatus] = useState<any>(null);
+  const [form, setForm] = useState({ botToken: "", chatId: "" });
+  const [pending, setPending] = useState<{ otp: string; botUsername: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const reload = useCallback(() => api("/api/telegram-otp").then(setStatus).catch(() => undefined), [api]);
+
+  useEffect(() => {
+    reload();
+    // Keep the bot's state live: after pairing it goes waiting -> starting -> online within
+    // seconds, and a failure shows up here with its reason instead of only in the server log.
+    const id = setInterval(reload, 4000);
+    return () => clearInterval(id);
+  }, [reload]);
+
+  const start = async () => {
+    setMessage(null);
+    setBusy(true);
+    try {
+      const res = await api("/api/telegram-otp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "start", botToken: form.botToken, chatId: form.chatId }) });
+      if (res.error) {
+        setMessage(res.error);
+        return;
+      }
+      setPending({ otp: res.otp, botUsername: res.botUsername });
+    } catch {
+      setMessage("The server did not answer. Check that it is running, then try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const check = async () => {
+    setBusy(true);
+    try {
+      const res = await api("/api/telegram-otp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "check" }) });
+      if (res.confirmed) {
+        setPending(null);
+        setMessage("Paired. The bot comes online in a few seconds -- watch the status above, then say hi to it in Telegram.");
+        reload();
+      } else {
+        setMessage(res.reason ?? "Not confirmed yet.");
+      }
+    } catch {
+      setMessage("The server did not answer. Try again in a moment.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const bot = describeBot(status?.bot);
+  return (
+    <div className="card">
+      <h2>Telegram Pairing</h2>
+      <div className="row" style={{ marginBottom: 8, gap: 8 }}>
+        <span className={`badge ${status?.paired ? "ok" : "warn"}`}>{status?.paired ? `Paired (chat ${status.chatId})` : "Not paired"}</span>
+        {status?.paired && <span className={`badge ${bot.tone === "ok" ? "ok" : "warn"}`}>{bot.text}</span>}
+      </div>
+      {status?.paired && bot.tone === "bad" && <div className="stat-note" style={{ marginBottom: 8 }}>{bot.text}</div>}
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input type="text" placeholder="Bot token (from @BotFather)" value={form.botToken} onChange={(e) => setForm({ ...form, botToken: e.target.value })} style={{ width: 280 }} />
+        <input type="text" placeholder="Chat ID (optional)" value={form.chatId} onChange={(e) => setForm({ ...form, chatId: e.target.value })} style={{ width: 160 }} />
+        <button className="btn" onClick={start} disabled={busy || !form.botToken.trim()}>
+          Start pairing
+        </button>
+      </div>
+      {pending && (
+        <div style={{ marginBottom: 10 }}>
+          <ol className="stat-note" style={{ margin: "0 0 10px 18px", padding: 0 }}>
+            <li>
+              Open <a href={`https://t.me/${pending.botUsername}`} target="_blank" rel="noreferrer">@{pending.botUsername}</a> in Telegram and press Start.
+            </li>
+            <li>Send it this code as a normal message.</li>
+            <li>Come back here and press Check.</li>
+          </ol>
+          <div className="row" style={{ alignItems: "center" }}>
+            <span className="pill" style={{ fontSize: 20, letterSpacing: 2 }}>
+              {pending.otp}
+            </span>
+            <button className="btn secondary" onClick={check} disabled={busy}>
+              {busy ? "Checking..." : "Check"}
+            </button>
+          </div>
+        </div>
+      )}
+      {message && <div className="stat-note">{message}</div>}
+    </div>
+  );
+}
+
+function ProviderKeysCard({ api, title, apiPath, providerListPath }: { userId: string; api: ReturnType<typeof useApi>; title: string; apiPath: string; providerListPath: string }) {
+  const [keys, setKeys] = useState<any[]>([]);
+  const [providers, setProviders] = useState<any[]>([]);
+  const [form, setForm] = useState({ provider: "gemini", label: "", apiKey: "", extraConfigJson: "" });
+  const [extraConfigError, setExtraConfigError] = useState("");
+  const [bulk, setBulk] = useState({ provider: "gemini", labelPrefix: "", rawKeys: "" });
+  const [bulkResults, setBulkResults] = useState<any[] | null>(null);
+  const [busyKeyId, setBusyKeyId] = useState<string | null>(null);
+  const [modelsByKey, setModelsByKey] = useState<Record<string, any>>({});
+
+  const reload = useCallback(() => {
+    api(apiPath).then((r) => setKeys(r.keys ?? []));
+  }, [api, apiPath]);
+
+  useEffect(() => {
+    reload();
+    api(providerListPath).then((r) => setProviders(r.builtIn ?? []));
+  }, [reload, api, providerListPath]);
+
+  const add = async () => {
+    // Real fix: some providers need more than apiKey -- Cloudflare (accountId), Bedrock
+    // (region + secretAccessKey), Azure (accountId = resource name, model = deployment name).
+    // There was previously NO way to enter any of these through this form at all, making those
+    // providers unusable outside a raw API call. This optional JSON field merges into config.
+    let extraConfig: Record<string, unknown> = {};
+    if (form.extraConfigJson.trim()) {
+      try {
+        extraConfig = JSON.parse(form.extraConfigJson);
+      } catch {
+        setExtraConfigError("Advanced config must be valid JSON, e.g. {\"accountId\": \"...\"}");
+        return;
+      }
+    }
+    setExtraConfigError("");
+    await api(apiPath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: form.provider, label: form.label, config: { apiKey: form.apiKey, ...extraConfig } }) });
+    setForm({ ...form, label: "", apiKey: "", extraConfigJson: "" });
+    reload();
+  };
+
+  const bulkAdd = async () => {
+    const res = await api(apiPath, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bulkAdd: true, provider: bulk.provider, labelPrefix: bulk.labelPrefix || bulk.provider, rawKeys: bulk.rawKeys }),
+    });
+    setBulkResults(res.results ?? []);
+    setBulk({ ...bulk, rawKeys: "" });
+    reload();
+  };
+
+  const checkHealth = async (k: any) => {
+    setBusyKeyId(k.id);
+    await api(apiPath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ checkHealth: true, provider: k.provider, checkKeyId: k.id }) });
+    setBusyKeyId(null);
+    reload();
+  };
+
+  const setPrimary = async (k: any) => {
+    await api(apiPath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ setPrimary: true, keyIdToMakePrimary: k.id }) });
+    reload();
+  };
+
+  const remove = async (k: any) => {
+    await api(`${apiPath}?keyId=${encodeURIComponent(k.id)}`, { method: "DELETE" });
+    reload();
+  };
+
+  const fetchModels = async (k: any) => {
+    setBusyKeyId(k.id);
+    const res = await api(apiPath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fetchModels: true, provider: k.provider, fetchModelsKeyId: k.id }) });
+    setBusyKeyId(null);
+    setModelsByKey({ ...modelsByKey, [k.id]: res });
+  };
+
+  return (
+    <div className="card">
+      <h2>{title}</h2>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })} style={{ width: 180 }}>
+          {providers.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.displayName}
+            </option>
+          ))}
+        </select>
+        <input type="text" placeholder="Label" value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} style={{ width: 140 }} />
+        <input type="password" placeholder="API key" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} style={{ width: 280 }} />
+        <button className="btn" onClick={add}>
+          Add key
+        </button>
+      </div>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input
+          type="text"
+          placeholder={'Advanced config JSON (Cloudflare/Azure: {"accountId":"..."}; Bedrock: {"region":"...","secretAccessKey":"..."}; Azure also needs {"model":"<deployment name>"})'}
+          value={form.extraConfigJson}
+          onChange={(e) => setForm({ ...form, extraConfigJson: e.target.value })}
+          style={{ width: 620 }}
+        />
+      </div>
+      {extraConfigError && <div style={{ color: "var(--red)", marginBottom: 10 }}>{extraConfigError}</div>}
+
+      <details style={{ marginBottom: 10 }}>
+        <summary style={{ cursor: "pointer", color: "var(--text-dim)" }}>Bulk-add (paste up to 10 keys, one per line)</summary>
+        <div className="row" style={{ marginTop: 8, alignItems: "flex-start" }}>
+          <select value={bulk.provider} onChange={(e) => setBulk({ ...bulk, provider: e.target.value })} style={{ width: 180 }}>
+            {providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.displayName}
+              </option>
+            ))}
+          </select>
+          <input type="text" placeholder="Label prefix" value={bulk.labelPrefix} onChange={(e) => setBulk({ ...bulk, labelPrefix: e.target.value })} style={{ width: 140 }} />
+          <textarea
+            placeholder={"One API key per line\n(up to 10)"}
+            value={bulk.rawKeys}
+            onChange={(e) => setBulk({ ...bulk, rawKeys: e.target.value })}
+            style={{ width: 280, height: 80 }}
+          />
+          <button className="btn" onClick={bulkAdd}>
+            Bulk-add
+          </button>
+        </div>
+        {bulkResults && (
+          <div style={{ marginTop: 8 }}>
+            {bulkResults.map((r, i) => (
+              <div key={i} className={`badge ${r.ok ? "ok" : "warn"}`} style={{ marginRight: 6, marginBottom: 4, display: "inline-block" }}>
+                {r.ok ? `OK: ${r.key?.label}` : `FAILED: ${r.error}`}
+              </div>
+            ))}
+          </div>
+        )}
+      </details>
+
+      {keys.length === 0 && <div className="placeholder">No keys stored yet.</div>}
+      {keys.map((k: any) => (
+        <div className="group-card" key={k.id}>
+          <strong>{k.label}</strong> <span style={{ color: "var(--text-dim)" }}>({k.provider ?? ""})</span>
+          {k.isPrimary && (
+            <span className="badge ok" style={{ marginLeft: 8 }}>
+              main
+            </span>
+          )}
+          <span className={`badge ${k.healthy ? "ok" : "warn"}`} style={{ marginLeft: 8 }}>
+            {k.healthy ? "healthy" : "unchecked/unhealthy"}
+          </span>
+          {k.lastError && <span style={{ marginLeft: 8, color: "var(--warn)", fontSize: 12 }}>{k.lastError}</span>}
+          <div className="row" style={{ marginTop: 6 }}>
+            <button className="btn" disabled={busyKeyId === k.id} onClick={() => checkHealth(k)}>
+              Check health
+            </button>
+            {!k.isPrimary && (
+              <button className="btn" onClick={() => setPrimary(k)}>
+                Set as main
+              </button>
+            )}
+            <button className="btn" disabled={busyKeyId === k.id} onClick={() => fetchModels(k)}>
+              Fetch models
+            </button>
+            <button className="btn" onClick={() => remove(k)}>
+              Remove
+            </button>
+          </div>
+          {modelsByKey[k.id] && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-dim)" }}>
+              {modelsByKey[k.id].manualEntryRequired
+                ? "This provider requires manual model-ID entry (no auto-fetch)."
+                : modelsByKey[k.id].error
+                  ? `Fetch failed: ${modelsByKey[k.id].error}`
+                  : `Models: ${modelsByKey[k.id].models?.join(", ") || "(none returned)"}`}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SimpleKeysCard({ api, title, apiPath }: { userId: string; api: ReturnType<typeof useApi>; title: string; apiPath: string }) {
+  const [keys, setKeys] = useState<any[]>([]);
+  const [form, setForm] = useState({ label: "", apiKey: "" });
+
+  const reload = useCallback(() => {
+    api(apiPath).then((r) => setKeys(r.keys ?? []));
+  }, [api, apiPath]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const add = async () => {
+    await api(apiPath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: form.label, apiKey: form.apiKey }) });
+    setForm({ label: "", apiKey: "" });
+    reload();
+  };
+
+  return (
+    <div className="card">
+      <h2>{title}</h2>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input type="text" placeholder="Label" value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} style={{ width: 140 }} />
+        <input type="password" placeholder="API key" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} style={{ width: 280 }} />
+        <button className="btn" onClick={add}>
+          Add key
+        </button>
+      </div>
+      {keys.length === 0 && <div className="placeholder">No keys stored yet.</div>}
+      {keys.map((k: any) => (
+        <div className="group-card" key={k.id}>
+          <strong>{k.label}</strong>
+          <span className={`badge ${k.healthy ? "ok" : "warn"}`} style={{ marginLeft: 8 }}>
+            {k.healthy ? "healthy" : "unchecked/unhealthy"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --- Settings: real EA + sandbox status checks (14.1; item 5: DAVEMA retirement -- the EA
+// connection is the real market-data dependency now, not the retired external DAVEMA API) ---
+function SettingsPanel({ userId }: { userId: string }) {
+  const [ea, setEa] = useState<any>(null);
+  const [sandbox, setSandbox] = useState<any>(null);
+
+  useEffect(() => {
+    fetch("/api/status/ea")
+      .then((r) => r.json())
+      .then(setEa);
+    fetch("/api/status/sandbox")
+      .then((r) => r.json())
+      .then(setSandbox);
+  }, []);
+
+  return (
+    <>
+      <div className="card">
+        <h2>System Status</h2>
+        <div className="row" style={{ gap: 24 }}>
+          <div>
+            MT5/EA bridge:{" "}
+            <span className={`badge ${ea ? (ea.connected ? "ok" : "bad") : "warn"}`}>
+              {ea ? (ea.connected ? "connected" : ea.lastSeenAt === null ? "never connected" : "disconnected") : "checking"}
+            </span>
+          </div>
+          <div>
+            Sandbox:{" "}
+            <span className={`badge ${sandbox ? (sandbox.reachable ? "ok" : "warn") : "warn"}`}>
+              {sandbox ? (sandbox.reachable ? "confined" : "degraded (unconfined)") : "checking"}
+            </span>
+          </div>
+        </div>
+        <div className="stat-note">Telegram, Green API, and AI provider credentials are set on the Credentials tab. This panel only reports connection health.</div>
+      </div>
+      <TradingLoopPanel userId={userId} />
+    </>
+  );
+}
+
+// --- Autonomous Trading: real scan-interval control + confidence auto-approve visibility ---
+// (the trader, live: "add a feature for every 1 min to analyze" -- a real UI control, not just
+// Telegram's /start_trading <minutes>; and separately: "the bot was even ask me to approve a
+// trade... a sniper entry and a normal entry" -- traced to confidence-gate.ts's
+// autoApproveBelowThreshold, which defaults ON but had no visible way to check its current live
+// value without digging through /settings on Telegram).
+function TradingLoopPanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [loop, setLoop] = useState<any>(null);
+  const [minutes, setMinutes] = useState(5);
+  const [confidence, setConfidence] = useState<any>(null);
+  const [threshold, setThresholdInput] = useState(70);
+  const [savedNote, setSavedNote] = useState("");
+
+  const reload = useCallback(() => {
+    api("/api/trading-loop").then((c) => {
+      setLoop(c);
+      setMinutes(c.intervalMinutes);
+    });
+    api("/api/confidence-settings").then((c) => {
+      setConfidence(c);
+      setThresholdInput(c.threshold);
+    });
+  }, [api]);
+
+  useEffect(() => {
+    reload();
+    // Real live visibility: "last cycle" is only useful if it actually updates while this card
+    // is open, not just on first load -- same 15s poll BalanceCard already uses.
+    const id = setInterval(reload, 15000);
+    return () => clearInterval(id);
+  }, [reload]);
+
+  const saveInterval = async (value: number) => {
+    const result = await api("/api/trading-loop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ intervalMinutes: value }) });
+    if (result.ok) {
+      setSavedNote(`Scan interval set to every ${value} min -- takes effect on the next scheduled cycle.`);
+      reload();
+    } else {
+      setSavedNote(`Error: ${result.error}`);
+    }
+  };
+
+  const toggleAutoApprove = async (enabled: boolean) => {
+    await api("/api/confidence-settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ autoApproveBelowThreshold: enabled }) });
+    reload();
+  };
+
+  const saveThreshold = async () => {
+    const result = await api("/api/confidence-settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threshold }) });
+    if (!result.ok) setSavedNote(`Error: ${result.error}`);
+    reload();
+  };
+
+  return (
+    <div className="card">
+      <h2>Autonomous Trading</h2>
+      <div className="row" style={{ marginBottom: 10, gap: 8 }}>
+        <span>Scan every</span>
+        {[1, 2, 5, 15].map((m) => (
+          <button key={m} className={`btn secondary${minutes === m ? " active" : ""}`} onClick={() => { setMinutes(m); void saveInterval(m); }}>
+            {m} min
+          </button>
+        ))}
+        <input
+          type="number"
+          min={loop?.min ?? 1}
+          max={loop?.max ?? 60}
+          value={minutes}
+          onChange={(e) => setMinutes(Number(e.target.value))}
+          style={{ width: 70 }}
+        />
+        <button className="btn secondary" onClick={() => saveInterval(minutes)}>
+          Save
+        </button>
+      </div>
+      {loop && (
+        <div className="stat-note">
+          Current: every {loop.intervalMinutes} min. Persisted intent: autonomous trading {loop.enabled ? "ON" : "OFF"}, execution {loop.executionEnabled ? "normal" : "watch-only (sniper-tier asks only)"}.
+          A running loop picks up a new interval on its very next tick automatically, no restart needed.
+          {!loop.enabled && (
+            <span> Loop is OFF — use Telegram <b>/start_trading</b> to start it, or <button className="btn secondary" style={{ marginLeft: 8, padding: "2px 10px" }} onClick={async () => { await api("/api/trading-loop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) }); reload(); setSavedNote("Loop intent set to ON — will auto-resume on next restart."); }}>Set ON for next restart</button></span>
+          )}
+        </div>
+      )}
+      {loop?.lastCycle && (
+        <div className="stat-note">
+          Last cycle ({new Date(loop.lastCycle.ts).toLocaleTimeString()}): {loop.lastCycle.reason}
+        </div>
+      )}
+
+      <hr style={{ margin: "16px 0", border: "none", borderTop: "0.5px solid var(--separator)" }} />
+
+      <div className="row" style={{ marginBottom: 10, gap: 8 }}>
+        <span>Confidence threshold:</span>
+        <input type="number" min={0} max={100} value={threshold} onChange={(e) => setThresholdInput(Number(e.target.value))} style={{ width: 70 }} />
+        <span>%</span>
+        <button className="btn secondary" onClick={saveThreshold}>
+          Save
+        </button>
+      </div>
+      <div className="row" style={{ marginBottom: 10, gap: 8 }}>
+        <span>Auto-approve trades below threshold:</span>
+        <span className={`badge ${confidence?.autoApproveBelowThreshold ? "ok" : "warn"}`}>{confidence?.autoApproveBelowThreshold ? "ON -- fires immediately" : "OFF -- queues for your approval"}</span>
+        <button className="btn secondary" onClick={() => toggleAutoApprove(!confidence?.autoApproveBelowThreshold)}>
+          {confidence?.autoApproveBelowThreshold ? "Turn off" : "Turn on"}
+        </button>
+      </div>
+      <div className="stat-note">
+        When this is OFF, every trade below your confidence threshold (including a genuinely high-conviction "sniper" one, if its score still lands under the threshold) queues for a real approve/decline
+        instead of firing on its own -- this is very likely what's behind seeing approval prompts you didn't expect. Default is ON.
+      </div>
+      {savedNote && <div className="stat-note">{savedNote}</div>}
+    </div>
+  );
+}
+
+// --- Phone app pairing ---
+/**
+ * The only place a pairing code can come from. The /api/pairing-code endpoint existed, but with no
+ * button for it the only way to pair a phone was a terminal command -- which is not a setup step
+ * anyone should have to take. Deliberately in the WEB panel (behind its own Basic Auth) and not in
+ * the app: the trusted surface mints the credential, so a stolen phone cannot mint another one.
+ */
+function PhonePanel({ userId }: { userId: string }) {
+  const api = useApi(userId);
+  const [devices, setDevices] = useState<{ id: string; label: string; pairedAt: number; lastSeenAt?: number }[] | null>(null);
+  const [code, setCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const endpoint = typeof window !== "undefined" ? window.location.origin : "";
+
+  const load = useCallback(() => {
+    api("/api/pairing-code")
+      .then((r) => setDevices(r.devices ?? []))
+      .catch(() => setError("Could not load paired phones."));
+  }, [api]);
+  useEffect(load, [load]);
+
+  const mint = async () => {
+    setError(null);
+    try {
+      const r = await api("/api/pairing-code", { method: "POST" });
+      setCode({ code: r.code, expiresAt: r.expiresAt });
+    } catch {
+      setError("Could not create a pairing code.");
+    }
+  };
+
+  const revoke = async (id: string) => {
+    if (!window.confirm("Disconnect this phone? It will need a new code to connect again.")) return;
+    await api(`/api/pairing-code?deviceId=${encodeURIComponent(id)}`, { method: "DELETE" });
+    load();
+  };
+
+  return (
+    <>
+      <div className="card">
+        <h2>Connect the phone app</h2>
+        <p className="sub" style={{ marginTop: 0 }}>
+          Open the app, and enter this server address and a pairing code. You only do this once per phone.
+        </p>
+        <div className="label">Server address</div>
+        <div style={{ fontSize: 17, fontWeight: 600, margin: "4px 0 16px", wordBreak: "break-all" }}>{endpoint}</div>
+        {code ? (
+          <>
+            <div className="label">Pairing code</div>
+            <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: "0.12em", fontVariantNumeric: "tabular-nums", margin: "4px 0" }}>{code.code}</div>
+            <div className="stat-note">Works once, expires at {new Date(code.expiresAt).toLocaleTimeString()}.</div>
+            <div className="row" style={{ marginTop: 16 }}>
+              <button className="btn secondary" onClick={mint}>New code</button>
+            </div>
+          </>
+        ) : (
+          <button className="btn" onClick={mint}>Get a pairing code</button>
+        )}
+        {error && <div className="stat-note" style={{ color: "var(--red)" }}>{error}</div>}
+      </div>
+
+      <div className="card">
+        <h2>Connected phones</h2>
+        {devices === null ? (
+          <div className="placeholder">Loading...</div>
+        ) : devices.length === 0 ? (
+          <div className="placeholder">No phones connected yet.</div>
+        ) : (
+          devices.map((d) => (
+            <div className="feed-item" key={d.id}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{d.label}</div>
+                <div className="meta">
+                  Connected {new Date(d.pairedAt).toLocaleDateString()}
+                  {d.lastSeenAt ? ` · last seen ${new Date(d.lastSeenAt).toLocaleString()}` : ""}
+                </div>
+              </div>
+              <button className="btn danger" onClick={() => revoke(d.id)}>Disconnect</button>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+}

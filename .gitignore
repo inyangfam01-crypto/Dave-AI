@@ -1,0 +1,13 @@
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+*.log
+.env
+data/
+.DS_Store
+ai-brain-service/.venv/
+.next/
+next-env.d.ts
+__pycache__/
+*.pyc

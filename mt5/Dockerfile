@@ -19,7 +19,8 @@ ENV WINEPREFIX=/opt/wine \
     AGENT_PORT=8081 \
     DAVE_STATE_DIR=/data/dave \
     DAVE_EA_SOURCE=/opt/dave/DaveEA.mq5 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    LIBGL_ALWAYS_SOFTWARE=1
 
 # wine64 plus the libraries it only "recommends" but MetaTrader needs: TLS (gnutls) for the broker
 # and the installer's downloads, and the X/GL bits for its window on the virtual screen.

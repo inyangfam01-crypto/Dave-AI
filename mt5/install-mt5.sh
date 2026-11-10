@@ -38,7 +38,8 @@ echo "virtual screen :${DISP_NUM} ready"
 xsetroot -solid '#202020' 2>/dev/null || true
 
 # --- can Wine load its window driver? --------------------------------------------------------------
-DRV="$(find /usr/lib -name 'winex11.drv.so' 2>/dev/null | head -1)"
+# Wine 9 ships this as winex11.so; older builds call it winex11.drv.so. Look for both.
+DRV="$(find /usr/lib -maxdepth 6 \( -name 'winex11.drv.so' -o -name 'winex11.so' \) 2>/dev/null | head -1)"
 echo "wine x11 driver: ${DRV:-MISSING}"
 if [ -z "$DRV" ]; then
   echo "the x11 window driver is not in this image -- MetaTrader could never open a window"

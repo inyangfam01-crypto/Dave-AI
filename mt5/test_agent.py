@@ -229,6 +229,10 @@ def _fake_metaeditor(*a, **k):
             f.write(open(src).read())
     return None
 agent.subprocess.run = _fake_metaeditor
+# compile_ea() refuses to start MetaEditor while the screen is down (the guard is real and stays).
+# This runner has no X server, so the screen check is stubbed the same way MetaEditor is: the EA
+# build is what these assertions are about.
+agent.ensure_display = lambda: True
 check(agent.ea_source_changed() is True, "a never-built EA counts as changed")
 ok, _ = agent.compile_ea()
 check(ok and open(agent.ex5_path()).read() == "// version 1", "first build")

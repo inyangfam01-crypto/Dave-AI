@@ -45,13 +45,22 @@ if [ -z "$DRV" ]; then
   echo "the x11 window driver is not in this image -- MetaTrader could never open a window"
   exit 1
 fi
-MISSING_LIBS="$(ldd "$DRV" 2>/dev/null | grep 'not found' || true)"
+# Wine's own libraries (ntdll.so, win32u.so, ...) sit beside the driver and are loaded by Wine's
+# loader, not by ld.so, so a bare ldd reports them as "not found" on a perfectly good image -- that
+# false alarm is what stopped this build. Give ldd every Wine library directory first, and only what
+# is still missing after that is really missing.
+DRV_DIR="$(dirname "$DRV")"
+WINE_LIB_PATH="$DRV_DIR"
+for d in /usr/lib/*/wine /usr/lib/*/wine/*-unix /usr/lib/wine /usr/lib/wine/*-unix; do
+  [ -d "$d" ] && WINE_LIB_PATH="$WINE_LIB_PATH:$d"
+done
+MISSING_LIBS="$(LD_LIBRARY_PATH="$WINE_LIB_PATH" ldd "$DRV" 2>/dev/null | grep 'not found' || true)"
 if [ -n "$MISSING_LIBS" ]; then
   echo "the x11 window driver cannot load -- these libraries are missing from the image:"
   echo "$MISSING_LIBS"
   exit 1
 fi
-echo "the x11 window driver loads ($(ldd "$DRV" 2>/dev/null | wc -l) libraries resolved)"
+echo "the x11 window driver loads ($(LD_LIBRARY_PATH="$WINE_LIB_PATH" ldd "$DRV" 2>/dev/null | wc -l) libraries resolved)"
 
 "$WINE_BIN" wineboot --init >/dev/null 2>&1 || true
 "$WINE_BIN" reg add "HKEY_CURRENT_USER\\Software\\Wine" /v Version /t REG_SZ /d win10 /f

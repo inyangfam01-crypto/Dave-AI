@@ -115,10 +115,14 @@ def wineserver_bin():
 def display_ok():
     """True when the virtual screen answers. xdpyinfo is the same check start.sh uses."""
     try:
-        return subprocess.run(
+        # The result can be None when subprocess.run is stubbed (the tests do that to fake
+        # MetaEditor): treat anything that is not a clean exit as "screen down" instead of
+        # raising, so a missing xdpyinfo never crashes a compile.
+        run = subprocess.run(
             ["xdpyinfo", "-display", DISPLAY],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
-        ).returncode == 0
+        )
+        return bool(run is not None and run.returncode == 0)
     except (OSError, subprocess.SubprocessError):
         return False
 

@@ -87,7 +87,7 @@ import { knowledgeList, knowledgeView } from "@dave/knowledge";
 import { publishActivity } from "./activity-bus.js";
 import { holdOrClose, protectInstead } from "./hold-to-plan.js";
 import { ownerTag } from "./trade-owner.js";
-</think>Now the tick wiring — compute the snapshot from what was already received, and pin it into the context right beside the MTF lines:<tool_call>edit<arg_key>newString</arg_key><arg_value>import { describeApa, describeApaCoordination } from "./apa-structure.js";
+import { describeApa, describeApaCoordination } from "./apa-structure.js";
 import { describeMarketHistory } from "./history-summary.js";
 import { describeIndicatorSnapshot } from "./indicator-snapshot.js";
 import { tradeDrawing } from "./setup-drawing.js";

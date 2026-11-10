@@ -14,7 +14,7 @@ import { PRIMARY_LAPS_BEFORE_FALLBACK } from "@dave/trading";
 export interface TickDecisionRecord {
   ts: number;
   symbol: string;
-  action: "BUY" | "SELL" | "SKIP" | "ASK" | "DELETE_TICKET" | "PARTIAL_CLOSE" | "MODIFY" | "PAUSE" | "CONSULT_JOURNAL" | "REQUEST_CANDLES" | "RUN_SCRIPT";
+  action: "BUY" | "SELL" | "SKIP" | "ASK" | "DELETE_TICKET" | "PARTIAL_CLOSE" | "MODIFY" | "PAUSE" | "CONSULT_JOURNAL" | "REQUEST_CANDLES" | "REQUEST_PAST_CANDLES" | "RUN_SCRIPT";
   reason: string;
 }
 

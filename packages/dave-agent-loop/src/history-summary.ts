@@ -115,7 +115,8 @@ export function describeMarketHistory(byTf: HistoryTfBars[], ref: number): strin
         const dir = highs[1].price > highs[0].price && lows[1].price > lows[0].price ? "HIGHER HIGHS and HIGHER LOWS (uptrend)"
           : highs[1].price < highs[0].price && lows[1].price < lows[0].price ? "LOWER HIGHS and LOWER LOWS (downtrend)"
           : "no consistent sequence (range)";
-        lines.push(`daily structure over the last ~${Math.round((now - list[Math.max(0, list.length - 4)].t) / DAY_MS)}d: ${dir}`);
+        const ref = list[Math.max(0, list.length - 4)];
+        lines.push(`daily structure over the last ~${Math.round((now - d1[ref.i].t) / DAY_MS)}d: ${dir}`);
       }
     }
     // Old levels price has respected, nearest to price first.

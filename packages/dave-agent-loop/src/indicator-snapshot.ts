@@ -65,7 +65,7 @@ function indicatorLine(tf: string, data: Record<string, unknown>): string | unde
   const atr = vol ? rec(vol.atr) : null;
   const atrVal = atr ? num(atr.value) : undefined;
   if (atrVal !== undefined) {
-    const pctl = num(atr.percentile_200);
+    const pctl = atr ? num(atr.percentile_200) : undefined;
     parts.push(`ATR ${digits(atrVal)}${pctl !== undefined ? ` (${Math.round(pctl)}th percentile of last 200 bars)` : ""}`);
   }
   const bb = vol ? rec(vol.bollinger) : null;
@@ -82,8 +82,8 @@ function indicatorLine(tf: string, data: Record<string, unknown>): string | unde
   const adx = trd ? rec(trd.adx) : null;
   const adxVal = adx ? num(adx.adx) : undefined;
   if (adxVal !== undefined) {
-    const di = txt(adx.di_on_top);
-    const rising = num(adx.plus_di) !== undefined ? bool(adx.rising) : undefined;
+    const di = adx ? txt(adx.di_on_top) : undefined;
+    const rising = adx && num(adx.plus_di) !== undefined ? bool(adx.rising) : undefined;
     parts.push(`ADX ${digits(adxVal)}${di !== undefined ? (di === "plus" ? " (uptrend force on top)" : " (downtrend force on top)") : ""}${rising !== undefined ? (rising ? ", rising" : ", falling") : ""}`);
   }
   const st = trd ? rec(trd.supertrend) : null;

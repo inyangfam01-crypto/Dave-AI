@@ -46,6 +46,10 @@ EA_SOURCE = os.environ.get("DAVE_EA_SOURCE", "/opt/dave/DaveEA.mq5")
 # Earlier EA versions, one file each (DaveEA-3.7.mq5 ...). The trader picks one in the app; "latest"
 # (or nothing picked) is EA_SOURCE, the newest.
 EA_VERSIONS_DIR = os.environ.get("DAVE_EA_VERSIONS_DIR", "/opt/dave/ea-versions")
+# The virtual screen MetaTrader draws on. start.sh owns it; the helpers below make sure it is
+# answering before Wine is asked to do anything (see ensure_display).
+DISPLAY = os.environ.get("DISPLAY", ":99")
+
 
 
 def ea_versions():
@@ -99,6 +103,60 @@ terminal_started_at = 0.0
 
 def log(*a):
     print("[dave-mt5]", *a, flush=True)
+
+
+def wineserver_bin():
+    for path in ("/usr/lib/wine/wineserver", "/usr/bin/wineserver"):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def display_ok():
+    """True when the virtual screen answers. xdpyinfo is the same check start.sh uses."""
+    try:
+        return subprocess.run(
+            ["xdpyinfo", "-display", DISPLAY],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def ensure_display():
+    """Wine picks its window driver the first time a Wine process starts, and keeps it for the whole
+    container. Started while the screen is not answering, Wine runs with no window driver at all:
+    "Application tried to create a window, but no driver could be loaded" -- MetaTrader never shows a
+    window and MetaEditor never compiles. So check the screen first, and if it is down, bring it back
+    and drop the poisoned wineserver before anything under Wine runs."""
+    if display_ok():
+        return True
+    log("the virtual screen", DISPLAY, "is not answering -- restarting it")
+    num = DISPLAY.lstrip(":").split(".")[0]
+    subprocess.run(["pkill", "-f", "Xvfb " + DISPLAY],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for path in ("/tmp/.X%s-lock" % num, "/tmp/.X11-unix/X%s" % num):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    try:
+        subprocess.Popen(["Xvfb", DISPLAY, "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        log("could not start Xvfb:", e)
+        return False
+    for _ in range(60):
+        if display_ok():
+            ws = wineserver_bin()
+            if ws:
+                subprocess.run([ws, "-k"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1)
+            log("virtual screen", DISPLAY, "is back")
+            return True
+        time.sleep(1)
+    log("the virtual screen did not come back")
+    return False
 
 
 # --- state -----------------------------------------------------------------------------------------
@@ -189,12 +247,23 @@ def compile_ea(source=None):
     backup = ex5_path() + ".bak"
     if os.path.exists(ex5_path()):
         os.replace(ex5_path(), backup)
-    subprocess.run(
-        [WINE, os.path.join(MT5_DIR, "MetaEditor64.exe"), "/portable", r"/compile:MQL5\Experts\Dave\DaveEA.mq5", r"/log:MQL5\Experts\Dave\compile.log"],
-        cwd=MT5_DIR, timeout=300, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    if not ensure_display():
+        return False, "no screen for MetaEditor -- the virtual display is down (see the container log)"
+    timed_out = False
+    try:
+        subprocess.run(
+            [WINE, os.path.join(MT5_DIR, "MetaEditor64.exe"), "/portable", r"/compile:MQL5\Experts\Dave\DaveEA.mq5", r"/log:MQL5\Experts\Dave\compile.log"],
+            cwd=MT5_DIR, timeout=180, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        # MetaEditor without a window sits forever: that is the signature of a dead screen, not a
+        # slow compile. Say so instead of hanging for five minutes and reporting nothing.
+        timed_out = True
     summary = read_text(log_path)[-600:]
     ok = os.path.exists(ex5_path())
+    if not ok and timed_out:
+        summary = ("MetaEditor did not finish in 180s (screen %s). %s"
+                   % ("answering" if display_ok() else "DOWN", summary)).strip()
     if ok:
         if os.path.exists(backup):
             os.remove(backup)
@@ -421,6 +490,7 @@ def clean_old_files():
 
 def start_terminal(state):
     global terminal_proc, terminal_started_at
+    ensure_display()
     try:
         clean_old_files()
     except Exception as e:  # housekeeping must never stop MT5 from starting
@@ -583,6 +653,8 @@ def status():
         relay = dict(relay_stats)
     return {
         "installed": installed(),
+        "display": display_ok(),
+        "mql5": os.path.isdir(os.path.join(MT5_DIR, "MQL5", "Include", "Trade")),
         "compiled": os.path.exists(ex5_path()),
         "eaVersion": str(state.get("eaVersion") or "latest"),
         "eaVersions": ea_versions(),

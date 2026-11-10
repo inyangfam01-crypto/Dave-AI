@@ -40,7 +40,7 @@ ENV WINEPREFIX=/opt/wine \
 RUN apt-get -qq update \
     && apt-get -qq -y -o Dpkg::Use-Pty=0 install --no-install-recommends ca-certificates curl python3 procps xvfb xauth \
        wine64 libgnutls30t64 libgl1 libgl1-mesa-dri libvulkan1 libdbus-1-3 libcups2t64 libgssapi-krb5-2 libkrb5-3 \
-       libxcomposite1 libxcursor1 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 fonts-liberation \
+       libxcomposite1 libxcursor1 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 fonts-liberation fonts-dejavu-core fonts-freefont-ttf fonts-noto-core fonts-wine \
        libxkbcommon0 libxkbcommon-x11-0 libfreetype6 libfontconfig1 libx11-xcb1 libxcb1 libxcb-render0 libxcb-shm0 \
        libxcb-util1 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
        libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxcb-xrm0 libxcb-xtest0 \

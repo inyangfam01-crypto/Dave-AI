@@ -74,17 +74,28 @@ echo "MetaTrader 5 installed: $MT5_DIR"
 
 # One bounded first run of MetaTrader itself: the real test that Wine can put a window on the screen,
 # and the run that unpacks MQL5.
-( cd "$MT5_DIR" && WINEDEBUG=err+all "$WINE_BIN" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
+# +seh: MetaTrader dies on its own ("NtRaiseHardError 50000018") before it writes any log of its
+# own, so the exception Wine sees is the only evidence of why. Record it, and look at the window
+# while the terminal is still alive instead of after it has gone.
+( cd "$MT5_DIR" && WINEDEBUG=+seh "$WINE_BIN" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
 WINDOW_OK=0
 for i in $(seq 1 60); do
   if [ -n "$(xdotool search --onlyvisible --name '.' 2>/dev/null | head -1)" ]; then WINDOW_OK=1; break; fi
   sleep 2
 done
+echo "[mt5] window titles while the terminal is up:"
+for w in $(xdotool search --onlyvisible --name '.' 2>/dev/null); do
+  echo "[mt5]   '$w' = '$(xdotool getwindowname "$w" 2>/dev/null | head -c 120)'"
+done
+sleep 20
+import -display :99 -window root -resize 800x -quality 40 /tmp/shot-early.jpg 2>/dev/null || true
+[ -s /tmp/shot-early.jpg ] && base64 -w 800 /tmp/shot-early.jpg | sed 's/^/SHOT30 /'
 if [ "$WINDOW_OK" = 1 ]; then
   echo "MetaTrader window is on the screen -- Wine can draw"
 else
   echo "META TRADER SHOWED NO WINDOW AFTER 120s -- this image would run blind. Wine said:"
   grep -E "driver could be loaded|DISPLAY|err:" /tmp/mt5-first-run.log 2>/dev/null | head -15 || true
+  grep -E "c0000|5000|seh:|Exception|unhandled|page fault" /tmp/mt5-first-run.log 2>/dev/null | head -30 || true
   tail -25 /tmp/mt5-first-run.log 2>/dev/null || true
   xwininfo -root -tree 2>/dev/null | head -10 || true
   pkill -f terminal64.exe || true
@@ -110,6 +121,8 @@ if [ -d "$MT5_DIR/MQL5/Include/Trade" ]; then
   done
 else
   echo "MQL5 not unpacked at build time -- start.sh finishes it at boot (log below)"
+  echo "exception/seh lines:"
+  grep -E "c0000|5000|seh:|Exception|unhandled|page fault" /tmp/mt5-first-run.log 2>/dev/null | head -30 || true
   ls -la "$MT5_DIR" 2>/dev/null | head -15 || true
   tail -25 /tmp/mt5-first-run.log 2>/dev/null || true
 fi

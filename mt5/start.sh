@@ -25,6 +25,9 @@ diagnose() {
   for w in $(xdotool search --onlyvisible --name "." 2>/dev/null); do
     echo "[diag] win $w name='$(xdotool getwindowname "$w" 2>/dev/null | head -c 100)' geom=$(xdotool getwindowgeometry --shell "$w" 2>/dev/null | tr '\n' ' ')"
   done
+  echo "[diag] window tree:"
+  xwininfo -root -tree 2>/dev/null | head -25
+  echo "[diag] active window: '$(xdotool getactivewindow getwindowname 2>/dev/null | head -c 100)'"
   echo "[diag] MQL5 folders in the prefix:"
   find "$WINEPREFIX/drive_c" -maxdepth 8 -type d -name MQL5 2>/dev/null | head -5
   echo "[diag] install dir:"
@@ -32,7 +35,7 @@ diagnose() {
   echo "[diag] wine said (last 25):"
   tail -25 /tmp/mt5-first-run.log 2>/dev/null
   echo "[diag] screen:"
-  import -display :99 -window root -resize 1100x -quality 60 /tmp/shot.jpg 2>/dev/null
+  import -display :99 -window root -resize 900x -quality 45 /tmp/shot.jpg 2>/dev/null
   ls -l /tmp/shot.jpg 2>/dev/null
   base64 -w 900 /tmp/shot.jpg 2>/dev/null | sed 's/^/SHOT /'
   echo "[diag] ---- end ----"

@@ -35,8 +35,10 @@ ENV WINEPREFIX=/opt/wine \
 # network only -- see packages/dave-agent-loop/src/mt5-screen.ts).
 # xdotool/xwd/imagemagick: the agent enters the MetaQuotes ID in MT5's own Options window (the only
 # way MT5 accepts it -- see apply_metaquotes_ids in agent.py) and checks the tick box on screen.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl python3 procps xvfb xauth \
+# -qq and Use-Pty=0 keep the build log readable: the apt chatter alone was filling Railway's
+# 1000-line build log and pushing the real failure (and install-mt5.sh's report) out of it.
+RUN apt-get -qq update \
+    && apt-get -qq -y -o Dpkg::Use-Pty=0 install --no-install-recommends ca-certificates curl python3 procps xvfb xauth \
        wine64 libgnutls30t64 libgl1 libgl1-mesa-dri libvulkan1 libdbus-1-3 libcups2t64 libgssapi-krb5-2 libkrb5-3 \
        libxcomposite1 libxcursor1 libxfixes3 libxi6 libxinerama1 libxrandr2 libxrender1 libxxf86vm1 fonts-liberation \
        libxkbcommon0 libxkbcommon-x11-0 libfreetype6 libfontconfig1 libx11-xcb1 libxcb1 libxcb-render0 libxcb-shm0 \

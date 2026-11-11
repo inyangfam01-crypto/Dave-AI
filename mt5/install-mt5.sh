@@ -65,6 +65,23 @@ echo "the x11 window driver loads ($(LD_LIBRARY_PATH="$WINE_LIB_PATH" ldd "$DRV"
 "$WINE_BIN" wineboot --init >/dev/null 2>&1 || true
 "$WINE_BIN" reg add "HKEY_CURRENT_USER\\Software\\Wine" /v Version /t REG_SZ /d win10 /f
 
+# --- Windows fonts --------------------------------------------------------------------------------
+# MetaTrader draws its own dialogs and its whole trading UI with Windows fonts. Wine's built-in set
+# covers Tahoma, but MetaTrader also asks for Arial, Times New Roman, Courier New, Verdana, Trebuchet,
+# Georgia, Impact, Comic, Webdings and Andale. When one of those is missing its window comes up as an
+# empty gray box and the terminal aborts early with hard error 50000018 (Wine's "errorstatus 50000018"
+# is the font path). Corefonts are the standard, redistributable set winetricks installs for exactly
+# this. Non-fatal on purpose: a slow mirror must not fail the whole image.
+echo "installing Windows core fonts"
+if command -v winetricks >/dev/null 2>&1; then
+  timeout 420 winetricks -q corefonts >/tmp/fonts.log 2>&1 || echo "winetricks corefonts did not finish -- see /tmp/fonts.log"
+else
+  echo "winetricks is not in this image"
+fi
+FONTDIR="$WINEPREFIX/drive_c/windows/Fonts"
+echo "windows fonts present: $(ls "$FONTDIR" 2>/dev/null | wc -l)"
+ls "$FONTDIR" 2>/dev/null | head -20
+
 # --- MetaTrader ------------------------------------------------------------------------------------
 curl -fsSL -o /tmp/mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
 "$WINE_BIN" /tmp/mt5setup.exe /auto || true   # exits non-zero on a harmless 32-bit helper; checked below

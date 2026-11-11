@@ -44,7 +44,7 @@ RUN apt-get -qq update \
        libxkbcommon0 libxkbcommon-x11-0 libfreetype6 libfontconfig1 libx11-xcb1 libxcb1 libxcb-render0 libxcb-shm0 \
        libxcb-util1 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
        libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-icccm4 libxcb-xrm0 libxcb-xtest0 \
-       xdotool x11-apps x11-utils x11-xserver-utils imagemagick tesseract-ocr \
+       xdotool x11-apps x11-utils x11-xserver-utils imagemagick tesseract-ocr cabextract winetricks \
        x11vnc novnc python3-websockify \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

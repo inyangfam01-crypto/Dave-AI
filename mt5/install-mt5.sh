@@ -77,7 +77,7 @@ echo "MetaTrader 5 installed: $MT5_DIR"
 # +seh: MetaTrader dies on its own ("NtRaiseHardError 50000018") before it writes any log of its
 # own, so the exception Wine sees is the only evidence of why. Record it, and look at the window
 # while the terminal is still alive instead of after it has gone.
-( cd "$MT5_DIR" && WINEDEBUG=+seh "$WINE_BIN" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
+( cd "$MT5_DIR" && WINEDEBUG=+seh,msgbox "$WINE_BIN" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
 WINDOW_OK=0
 for i in $(seq 1 60); do
   if [ -n "$(xdotool search --onlyvisible --name '.' 2>/dev/null | head -1)" ]; then WINDOW_OK=1; break; fi
@@ -88,6 +88,10 @@ for w in $(xdotool search --onlyvisible --name '.' 2>/dev/null); do
   echo "[mt5]   '$w' = '$(xdotool getwindowname "$w" 2>/dev/null | head -c 120)'"
 done
 sleep 20
+echo "[ocr] build ---- screen while the terminal is up ----"
+import -display :99 -window root -resize 900x -quality 45 /tmp/shot-ocr.jpg 2>/dev/null || true
+command -v tesseract >/dev/null 2>&1 && tesseract /tmp/shot-ocr.jpg - 2>/dev/null | sed '/^$/d' | head -25
+echo "[ocr] build ---- end ----"
 import -display :99 -window root -resize 800x -quality 40 /tmp/shot-early.jpg 2>/dev/null || true
 [ -s /tmp/shot-early.jpg ] && base64 -w 800 /tmp/shot-early.jpg | sed 's/^/SHOT30 /'
 if [ "$WINDOW_OK" = 1 ]; then

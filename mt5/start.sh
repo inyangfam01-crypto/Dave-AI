@@ -40,6 +40,19 @@ WINE="${WINE_BIN:-/usr/lib/wine/wine64}"
 
 mql5_ready() { [ -d "$MT5_DIR/MQL5/Include/Trade" ]; }
 
+
+# Read whatever MetaTrader is showing instead of guessing: the dialog that blocks start-up is drawn
+# on the virtual screen, so photograph it and run OCR over the picture. Printed between markers so
+# the text can be lifted straight out of the CI/Railway log.
+shoot_and_read() {
+  local tag="$1"
+  import -display "${DISPLAY}" -window root -resize 900x -quality 45 "/tmp/shot-${tag}.jpg" 2>/dev/null || return 0
+  echo "[ocr] ---- screen ${tag} ----"
+  command -v tesseract >/dev/null 2>&1 && tesseract "/tmp/shot-${tag}.jpg" - 2>/dev/null | sed '/^$/d' | head -25
+  echo "[ocr] ---- end ${tag} ----"
+  base64 -w 900 "/tmp/shot-${tag}.jpg" 2>/dev/null | sed "s/^/SHOT-${tag} /"
+}
+
 # Everything the next person needs to see when MetaTrader will not come up, printed into the
 # service log: what is running, what windows exist on the virtual screen, whether MQL5 appeared
 # anywhere in the prefix, what Wine said, and a picture of the screen (base64, one chunk per line,
@@ -68,6 +81,7 @@ diagnose() {
   import -display "${DISPLAY}" -window root -resize 900x -quality 45 /tmp/shot.jpg 2>/dev/null
   ls -l /tmp/shot.jpg 2>/dev/null
   base64 -w 900 /tmp/shot.jpg 2>/dev/null | sed 's/^/SHOT /'
+  shoot_and_read "end"
   echo "[diag] ---- end ----"
 }
 
@@ -76,11 +90,15 @@ diagnose() {
 # then sits on a modal window never writes the folder and says nothing about it.
 if ! mql5_ready && [ -e "$MT5_DIR/terminal64.exe" ]; then
   echo "[mt5] first run: letting MetaTrader unpack its MQL5 folder"
-  ( cd "$MT5_DIR" && WINEDEBUG=err+all "$WINE" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
+  ( cd "$MT5_DIR" && WINEDEBUG=err+all,msgbox "$WINE" terminal64.exe /portable >/tmp/mt5-first-run.log 2>&1 ) &
   for i in $(seq 1 60); do
     mql5_ready && break
     if [ $((i % 15)) -eq 0 ]; then
       echo "[mt5] still unpacking ($((i * 2))s) -- windows: $(xdotool search --onlyvisible --name '.' 2>/dev/null | wc -l)"
+      for w in $(xdotool search --onlyvisible --name "." 2>/dev/null); do
+        echo "[mt5]   win $w='$(xdotool getwindowname "$w" 2>/dev/null | head -c 100)'"
+      done
+      [ $i -eq 30 ] && shoot_and_read "60s"
     fi
     sleep 2
   done

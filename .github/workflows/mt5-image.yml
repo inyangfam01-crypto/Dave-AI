@@ -18,7 +18,11 @@ jobs:
       - name: Agent tests
         run: python3 mt5/test_agent.py
       - name: Build image
-        run: docker build -f mt5/Dockerfile -t dave-mt5:ci .
+        # --network=host: the runner docker daemon cannot always resolve archive.ubuntu.com
+        # ("Could not resolve 'archive.ubuntu.com'" three runs in a row), which fails apt in the
+        # image for every package. The host network has working DNS, and this changes only the CI
+        # build, not the image or how Railway builds it.
+        run: docker build --network=host -f mt5/Dockerfile -t dave-mt5:ci .
       - name: Image size
         run: docker image ls dave-mt5:ci
       - name: Run it -- EA compiles, MT5 starts with it on a chart
